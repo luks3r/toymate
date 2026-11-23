@@ -1813,12 +1813,12 @@ function parseRule(raw, zones) {
     then
   };
 }
-function parseModes(raw) {
+function parseModes(raw, keepOff) {
   const out = {};
   if (!isRecord(raw))
     return out;
   for (const [id, mode] of Object.entries(raw))
-    if (isMode(mode) && mode !== "off")
+    if (isMode(mode) && (keepOff || mode !== "off"))
       out[id] = mode;
   return out;
 }
@@ -1862,12 +1862,21 @@ function parseSettings(raw) {
       readingCps: num(story.readingCps, d.story.readingCps, 3, 100),
       awareness: bool(story.awareness, d.story.awareness)
     },
-    chatModes: parseModes(r.chatModes),
-    characterModes: parseModes(r.characterModes)
+    chatModes: parseModes(r.chatModes, true),
+    characterModes: parseModes(r.characterModes, false)
   };
 }
 function modeFor(settings, chatId, characterId) {
-  return chatId && settings.chatModes[chatId] || characterId && settings.characterModes[characterId] || "off";
+  return (chatId ? settings.chatModes[chatId] : undefined) ?? (characterId ? settings.characterModes[characterId] : undefined) ?? "off";
+}
+function withChatMode(settings, chatId, characterId, mode) {
+  const chatModes = { ...settings.chatModes };
+  const inherited = (characterId ? settings.characterModes[characterId] : undefined) ?? "off";
+  if (mode === inherited)
+    delete chatModes[chatId];
+  else
+    chatModes[chatId] = mode;
+  return { ...settings, chatModes };
 }
 function prefsFor(settings, key) {
   return settings.outputs[key] ?? { ...DEFAULT_OUTPUT_PREFS, zone: settings.zones[0] ?? DEFAULT_ZONE };
@@ -1906,15 +1915,6 @@ function sceneKeyFor(output, settings) {
   return NAMED_ZONE_ONLY.has(output.kind) ? namedSceneKey(zone) : zone;
 }
 var namedSceneKey = (zone) => `${zone}:named`;
-function describeKind(kind) {
-  switch (kind) {
-    case "HwPositionWithDuration":
-    case "Position":
-      return "stroke";
-    default:
-      return kind.toLowerCase();
-  }
-}
 
 // src/frontend/engine/adapter.ts
 var isOutputKind = (v) => OUTPUT_KINDS.includes(v);
@@ -2944,11 +2944,9 @@ class Triggers {
       this.engine.stopEverything({ pause: true });
       for (const id of [...this.plans.keys()])
         this.dropPlan(id);
-      if (chatId && settings.chatModes[chatId] === "story") {
-        const chatModes = { ...settings.chatModes };
-        delete chatModes[chatId];
-        this.host.saveSettings({ ...settings, chatModes });
-      }
+      const characterId = this.host.activeChat().characterId;
+      if (chatId && modeFor(settings, chatId, characterId) === "story")
+        this.host.saveSettings(withChatMode(settings, chatId, characterId, "off"));
       this.lastPlan = null;
       this.setPlan({ state: "idle", detail: "Safeword: everything stopped.", cues: [] });
       return;
@@ -3047,14 +3045,51 @@ function h(tag, props = {}, ...children) {
       el.append(c);
   return el;
 }
+var ICONS = {
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" stroke="none"/>',
+  play: '<path d="M8 5.5v13l10.5-6.5z" fill="currentColor" stroke="none"/>',
+  plug: '<path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0zM12 16v5"/>',
+  scan: '<path d="M5 12a7 7 0 0 1 14 0M8 12a4 4 0 0 1 8 0"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/>',
+  minus: '<path d="M6 12h12"/>',
+  plus: '<path d="M12 6v12M6 12h12"/>',
+  hold: '<path d="M9 6v12M15 6v12"/>',
+  lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  unlock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>',
+  trash: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/>',
+  battery: '<rect x="3" y="8" width="16" height="9" rx="2"/><path d="M21 11v3"/>',
+  chevron: '<path d="M9 6l6 6-6 6"/>',
+  vibrate: '<path d="M3 12c2-4 3 4 5 0s3 4 5 0 3 4 5 0 2 4 3 0"/>',
+  rotate: '<path d="M20 12a8 8 0 1 1-3-6.2"/><path d="M20 4v5h-5"/>',
+  stroke: '<path d="M12 3v18M8 7l4-4 4 4M8 17l4 4 4-4"/>',
+  air: '<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3"/>',
+  heat: '<path d="M12 3v11"/><circle cx="12" cy="17" r="3.5"/>',
+  dot: '<circle cx="12" cy="12" r="3" fill="currentColor"/>'
+};
+function icon(name, cls = "") {
+  const span = h("span", { class: `tm-icon ${cls}`, "aria-hidden": "true" });
+  span.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
+  return span;
+}
+function button(content, onClick, cls = "", title) {
+  const b = h("button", { type: "button", class: `tm-btn ${cls}`, title, "aria-label": title, onclick: onClick });
+  b.append(...(Array.isArray(content) ? content : [content]).filter((c) => !!c));
+  return b;
+}
+function segmented(value, options, onChange, label, cls = "") {
+  return h("div", { class: `tm-seg ${cls}`, role: "radiogroup", "aria-label": label }, ...options.map(([v, text]) => h("button", { type: "button", role: "radio", "aria-checked": String(v === value), class: v === value ? "on" : "", onclick: () => v !== value && onChange(v) }, text)));
+}
+function chips(value, options, onChange, label) {
+  return h("div", { class: "tm-chips", role: "radiogroup", "aria-label": label }, ...options.map((v) => h("button", { type: "button", role: "radio", "aria-checked": String(v === value), class: v === value ? "on" : "", onclick: () => onChange(v) }, v)));
+}
 function select(value, options, onChange, label) {
   return h("select", { class: "tm-input", "aria-label": label, onchange: (e) => onChange(e.target.value) }, ...options.map((o) => {
     const [v, text] = typeof o === "string" ? [o, o] : o;
     return h("option", { value: v, selected: v === value }, text);
   }));
 }
-function slider(label, value, min, max, step, onCommit, unit = "") {
-  const out = h("span", { class: "tm-dim" }, `${value}${unit}`);
+function range(value, min, max, step, onCommit, label, format = (v) => `${v}`) {
+  const out = h("output", { class: "tm-range-value" }, format(value));
+  const paint = (v) => input.style.setProperty("--tm-fill", `${(v - min) / (max - min || 1) * 100}%`);
   const input = h("input", {
     type: "range",
     min,
@@ -3062,246 +3097,323 @@ function slider(label, value, min, max, step, onCommit, unit = "") {
     step,
     value,
     "aria-label": label,
-    oninput: (e) => out.textContent = `${e.target.value}${unit}`,
+    oninput: (e) => {
+      const v = Number(e.target.value);
+      out.textContent = format(v);
+      paint(v);
+    },
     onchange: (e) => onCommit(Number(e.target.value))
   });
-  return h("label", { class: "tm-field" }, h("span", {}, label), input, out);
+  paint(value);
+  return h("div", { class: "tm-range" }, input, out);
 }
-function numberField(label, value, min, max, onCommit) {
-  return h("label", { class: "tm-field" }, h("span", {}, label), h("input", { class: "tm-input tm-num", type: "number", min, max, value, onchange: (e) => onCommit(Number(e.target.value)) }));
+function number(value, min, max, onCommit, label) {
+  return h("input", { class: "tm-input tm-num", type: "number", min, max, value, "aria-label": label, onchange: (e) => onCommit(Number(e.target.value)) });
 }
-function toggle(label, checked, onChange) {
-  return h("label", { class: "tm-toggle" }, h("input", { type: "checkbox", checked, onchange: (e) => onChange(e.target.checked) }), h("span", {}, label));
+function text(value, onCommit, label, placeholder = "") {
+  return h("input", { class: "tm-input", type: "text", value, placeholder, "aria-label": label, onchange: (e) => onCommit(e.target.value) });
 }
-function textField(label, value, onCommit, placeholder = "") {
-  return h("label", { class: "tm-field tm-field-wide" }, h("span", {}, label), h("input", { class: "tm-input", type: "text", value, placeholder, onchange: (e) => onCommit(e.target.value) }));
+function toggle(checked, onChange, label) {
+  return h("label", { class: "tm-switch", title: label }, h("input", { type: "checkbox", role: "switch", checked, "aria-label": label, onchange: (e) => onChange(e.target.checked) }), h("span", { class: "tm-switch-track" }));
 }
-function button(text, onClick, cls = "", title) {
-  return h("button", { type: "button", class: `tm-btn ${cls}`, title, onclick: onClick }, text);
+function field(label, control, hint, stacked = false) {
+  return h("div", { class: `tm-field${stacked ? " tm-stacked" : ""}` }, h("div", { class: "tm-field-label" }, h("span", {}, label), hint ? h("small", {}, hint) : null), control);
 }
-function section(title, open, onToggle, body) {
-  const d = h("details", { class: "tm-section", open }, h("summary", {}, title), body);
-  d.addEventListener("toggle", () => onToggle(d.open));
-  return d;
+function group(title, ...children) {
+  return h("section", { class: "tm-group" }, h("h3", {}, title), ...children);
 }
 
 // src/frontend/ui/panel.ts
-var MODE_LABELS = { off: "Off", reactive: "Reactive (rules)", story: "Story (planner)" };
-var TRIGGER_LABELS = { character_message: "Character reply finished", user_message: "User message sent", streaming: "While reply streams" };
+var TABS = [
+  ["play", "Play"],
+  ["devices", "Devices"],
+  ["rules", "Rules"],
+  ["settings", "Settings"]
+];
+var MODE_HINT = {
+  off: "Nothing moves on its own. You can still play by hand below.",
+  reactive: "Your rules react to new replies and messages.",
+  story: "After each reply, a planner reads it and plays cues as you read."
+};
+var TRIGGER_LABELS = { character_message: "a reply finishes", user_message: "I send a message", streaming: "a reply is streaming" };
+var KIND = {
+  Vibrate: { label: "Vibrate", icon: "vibrate" },
+  Rotate: { label: "Rotate", icon: "rotate" },
+  Oscillate: { label: "Thrust", icon: "stroke" },
+  Constrict: { label: "Squeeze", icon: "air" },
+  Inflate: { label: "Inflate", icon: "air" },
+  HwPositionWithDuration: { label: "Stroke", icon: "stroke" },
+  Position: { label: "Position", icon: "stroke" },
+  Temperature: { label: "Warmth", icon: "heat" },
+  Spray: { label: "Spray", icon: "dot" },
+  Led: { label: "Light", icon: "dot" }
+};
+var pct = (v) => `${v}%`;
+var present = (...children) => children.filter((c) => c !== null);
 function mountPanel(root, deps) {
   const { engine, triggers } = deps;
-  const open = new Set(["live", "devices"]);
-  const sec = (id, title, body) => section(title, open.has(id), (o) => o ? open.add(id) : open.delete(id), body);
+  let tab = "play";
   const dot = h("span", { class: "tm-dot" });
-  const statusText = h("span", {});
-  const connectBtn = button("Connect", () => void (engine.view().connection === "connected" ? engine.disconnect() : engine.connect()), "tm-primary");
-  const scanBtn = button("Scan", () => void engine.toggleScan());
-  const stopBtn = button("STOP ALL", () => void engine.panic(), "tm-stop", "Stop every device and pause Toymate (Shift+Esc)");
-  const resumeBtn = button("Resume Toymate", () => engine.resume(), "tm-primary");
-  const errorLine = h("div", { class: "tm-error", hidden: true });
-  const modeRow = h("div", { class: "tm-row" });
-  const reactions = h("div", { class: "tm-row" }, h("span", { class: "tm-dim" }, "React:"), button("More", () => engine.react("more"), "tm-small"), button("Less", () => engine.react("less"), "tm-small"), button("Hold", () => engine.react("hold"), "tm-small"), button("Stop", () => engine.react("stop"), "tm-small"));
-  const head = h("div", { class: "tm-head" }, h("div", { class: "tm-row tm-spread" }, h("span", { class: "tm-status" }, dot, statusText), h("span", { class: "tm-row" }, scanBtn, connectBtn)), stopBtn, resumeBtn, errorLine, modeRow, reactions);
-  const liveBody = h("div", {});
-  const meters = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
-  const manual = h("div", {});
-  const planBox = h("div", {});
-  liveBody.append(meters, manual, planBox);
-  const devicesBody = h("div", {});
-  const rulesBody = h("div", {});
-  const storyBody = h("div", {});
-  const safetyBody = h("div", {});
-  const connectionBody = h("div", {});
-  root.replaceChildren(h("div", { class: "tm-panel" }, head, sec("live", "Live", liveBody), sec("devices", "Devices & zones", devicesBody), sec("rules", "Reactive rules", rulesBody), sec("story", "Story mode", storyBody), sec("safety", "Safety & limits", safetyBody), sec("connection", "Connection", connectionBody)));
+  const connTitle = h("b", {});
+  const connSub = h("small", {});
+  const scanBtn = button(icon("scan"), () => void engine.toggleScan(), "ghost icon-only", "Scan for devices");
+  const connectBtn = button("Connect", () => void (engine.view().connection === "connected" ? engine.disconnect() : engine.connect()), "primary sm");
+  const stopBtn = button([icon("stop"), "STOP", h("small", {}, "Shift+Esc")], () => void engine.panic(), "tm-stop", "Stop every device and pause Toymate");
+  const paused = h("div", { class: "tm-paused", role: "status" }, h("div", {}, h("b", {}, "Paused"), h("small", {}, "Every device is stopped. Nothing runs until you resume.")), button([icon("play"), "Resume"], () => engine.resume(), "primary"));
+  const alert = h("div", { class: "tm-alert", role: "alert" });
+  const tabButtons = TABS.map(([id, label]) => h("button", { type: "button", role: "tab", onclick: () => setTab(id) }, label));
+  const bodies = {
+    play: h("div", { class: "tm-tab", role: "tabpanel" }),
+    devices: h("div", { class: "tm-tab", role: "tabpanel" }),
+    rules: h("div", { class: "tm-tab", role: "tabpanel" }),
+    settings: h("div", { class: "tm-tab", role: "tabpanel" })
+  };
+  root.replaceChildren(h("div", { class: "tm" }, h("div", { class: "tm-top" }, h("div", { class: "tm-conn" }, dot, h("div", { class: "tm-conn-text" }, connTitle, connSub), scanBtn, connectBtn), stopBtn, paused, alert), h("div", { class: "tm-tabs", role: "tablist" }, ...tabButtons), ...Object.values(bodies)));
+  function setTab(next) {
+    tab = next;
+    TABS.forEach(([id], i) => {
+      tabButtons[i].className = id === tab ? "on" : "";
+      tabButtons[i].setAttribute("aria-selected", String(id === tab));
+      bodies[id].hidden = id !== tab;
+    });
+  }
   function renderHeader() {
     const v = engine.view();
+    const outputs = v.devices.reduce((n, d) => n + d.outputs.length, 0);
     dot.dataset.state = v.connection;
-    dot.dataset.active = String(v.active);
-    statusText.textContent = v.connection === "connected" ? `${v.devices.length} device${v.devices.length === 1 ? "" : "s"}${v.paused ? " · paused" : v.active ? " · running" : ""}` : v.connection === "connecting" ? "Connecting…" : "Not connected";
+    dot.dataset.active = String(v.active && !v.paused);
+    connTitle.textContent = v.connection === "connected" ? v.devices.length ? `${v.devices.length} ${v.devices.length === 1 ? "toy" : "toys"} connected` : "Connected, no toys yet" : v.connection === "connecting" ? "Connecting…" : "Not connected";
+    connSub.textContent = v.connection === "connected" ? v.scanning ? "Scanning for toys…" : v.devices.length ? `${outputs} output${outputs === 1 ? "" : "s"}${v.active && !v.paused ? " · running" : ""}` : "Turn a toy on, then scan" : deps.settings().intifaceUrl;
     connectBtn.textContent = v.connection === "connected" ? "Disconnect" : "Connect";
+    connectBtn.className = `tm-btn sm ${v.connection === "connected" ? "" : "primary"}`;
     connectBtn.disabled = v.connection === "connecting";
-    scanBtn.textContent = v.scanning ? "Stop scan" : "Scan";
-    scanBtn.disabled = v.connection !== "connected";
+    scanBtn.hidden = v.connection !== "connected";
+    scanBtn.setAttribute("aria-pressed", String(v.scanning));
     stopBtn.hidden = v.paused;
-    resumeBtn.hidden = !v.paused;
-    errorLine.hidden = !v.error;
-    errorLine.textContent = v.error ?? "";
+    paused.hidden = !v.paused;
+    alert.hidden = !v.error;
+    alert.textContent = v.error ?? "";
+    connectHint.hidden = v.connection === "connected";
   }
+  const connectHint = h("div", { class: "tm-empty" }, icon("plug"), h("div", {}, h("b", {}, "Connect to Intiface"), h("p", { class: "tm-hint" }, "Open Intiface Central on this device, press Start Server, then connect.")), button("Connect", () => void engine.connect(), "primary"));
+  const modeBox = h("div", {});
+  const zoneList = h("div", { class: "tm-zones" });
+  const reactions = h("div", { class: "tm-reactions" }, button([icon("minus"), "Less"], () => engine.react("less"), "sm", "Less intense"), button([icon("hold"), "Hold"], () => engine.react("hold"), "sm", "Keep it like this"), button([icon("plus"), "More"], () => engine.react("more"), "sm", "More intense"), button([icon("stop"), "Stop"], () => engine.react("stop"), "sm", "Stop the scene (not a pause)"));
+  const handBox = h("div", {});
+  const cueBox = h("div", {});
+  bodies.play.append(connectHint, modeBox, group("Now", zoneList, reactions, h("p", { class: "tm-hint" }, "Reactions change things right away; in Story mode the next plan hears about them too.")), cueBox, handBox);
   function renderMode() {
     const s = deps.settings();
     const { chatId, characterId } = deps.activeChat();
-    const setChat = (mode) => deps.update((x) => {
-      const chatModes = { ...x.chatModes };
-      if (!chatId)
-        return x;
-      if (mode === "off")
-        delete chatModes[chatId];
-      else
-        chatModes[chatId] = mode;
-      return { ...x, chatModes };
-    });
-    const setCharacter = (mode) => deps.update((x) => {
-      const characterModes = { ...x.characterModes };
+    if (!chatId) {
+      modeBox.replaceChildren(group("This chat", h("p", { class: "tm-hint" }, "Open a chat to choose how it drives your toys.")));
+      return;
+    }
+    const own = s.chatModes[chatId];
+    const effective = modeFor(s, chatId, characterId);
+    const setChat = (mode) => deps.update((x) => withChatMode(x, chatId, characterId, mode));
+    const setDefault = (on) => deps.update((x) => {
       if (!characterId)
         return x;
-      if (mode === "off")
-        delete characterModes[characterId];
+      const characterModes = { ...x.characterModes };
+      if (on && effective !== "off")
+        characterModes[characterId] = effective;
       else
-        characterModes[characterId] = mode;
+        delete characterModes[characterId];
       return { ...x, characterModes };
     });
-    const effective = chatId && s.chatModes[chatId] || characterId && s.characterModes[characterId] || "off";
-    modeRow.replaceChildren(...chatId ? [
-      h("span", { class: "tm-dim" }, "Mode:"),
-      h("span", { class: "tm-mode", "data-mode": effective }, MODE_LABELS[effective]),
-      select(s.chatModes[chatId] ?? "off", MODES.map((m) => [m, `This chat: ${MODE_LABELS[m]}`]), setChat, "Mode for this chat"),
-      ...characterId ? [select(s.characterModes[characterId] ?? "off", MODES.map((m) => [m, `Character default: ${MODE_LABELS[m]}`]), setCharacter, "Default mode for this character")] : []
-    ] : [h("span", { class: "tm-hint" }, "Open a chat to choose its mode.")]);
+    const conn = deps.connections()?.find((c) => c.id === s.story.connectionId);
+    modeBox.replaceChildren(group("This chat", segmented(effective, [["off", "Off"], ["reactive", "Reactive"], ["story", "Story"]], setChat, "Mode for this chat", "big"), h("p", { class: "tm-hint" }, MODE_HINT[effective], own === undefined && effective !== "off" ? " (this character's default)" : ""), effective === "story" ? h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, `Planner: ${conn ? `${conn.name} · ${conn.model}` : "your active connection"}`), button("Change", () => setTab("settings"), "ghost sm")) : effective === "reactive" ? h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, `${s.rules.filter((r) => r.enabled).length} active rule${s.rules.filter((r) => r.enabled).length === 1 ? "" : "s"}`), button("Edit rules", () => setTab("rules"), "ghost sm")) : null, characterId && effective !== "off" ? field("Use for every chat with this character", toggle(s.characterModes[characterId] === effective, setDefault, "Use this mode for every chat with this character")) : null));
   }
-  let meterZones = "";
-  const meterRefs = new Map;
-  function renderMeters() {
+  let zoneSig = "";
+  const zoneRefs = new Map;
+  function renderZones() {
     const views = engine.view().scenes;
     const sig = views.map((v) => v.zone).join("|");
-    if (sig !== meterZones) {
-      meterZones = sig;
-      meterRefs.clear();
-      meters.replaceChildren(...views.map((v) => {
+    if (sig !== zoneSig) {
+      zoneSig = sig;
+      zoneRefs.clear();
+      zoneList.replaceChildren(...views.map((v) => {
         const fill = h("i", {});
         const mark = h("b", {});
-        const text = h("span", { class: "tm-dim" });
-        const lock = h("input", { type: "checkbox", title: "Lock: ignore rules and planner for this zone", onchange: (e) => engine.setLocked(v.zone, e.target.checked) });
-        meterRefs.set(v.zone, { fill, mark, text, lock });
-        return h("div", { class: "tm-zone" }, h("span", {}, v.zone), h("div", { class: "tm-meter" }, fill, mark), text, h("label", { class: "tm-toggle", title: "Lock zone" }, lock, h("span", { class: "tm-dim" }, "lock")));
+        const level = h("span", { class: "tm-zone-level" });
+        const sub = h("small", {});
+        const lock = button(icon("unlock"), () => engine.setLocked(v.zone, !engine.isLocked(v.zone)), "ghost icon-only tm-lock", "Lock: rules and planner leave this zone alone");
+        const el = h("div", { class: "tm-zone" }, h("div", { class: "tm-zone-name" }, v.zone, sub), h("div", { class: "tm-row" }, level, lock), h("div", { class: "tm-bar" }, fill, mark));
+        zoneRefs.set(v.zone, { root: el, fill, mark, level, sub, lock });
+        return el;
       }));
     }
     for (const v of views) {
-      const r = meterRefs.get(v.zone);
+      const r = zoneRefs.get(v.zone);
       if (!r)
         continue;
+      const idle = v.level === 0 && v.target === 0 && !v.accent;
+      r.root.dataset.idle = String(idle);
       r.fill.style.width = `${v.level}%`;
-      r.mark.style.left = `${v.target}%`;
-      r.text.textContent = v.target > 0 || v.level > 0 ? `${v.level} · ${v.accent ?? `${v.feel}, ${v.tempo}`}` : "idle";
-      r.lock.checked = v.locked;
+      r.mark.style.left = `calc(${v.target}% - 1px)`;
+      r.mark.hidden = idle;
+      r.level.textContent = String(v.level);
+      r.sub.textContent = idle ? "idle" : v.accent ? v.accent : `${v.feel} · ${v.tempo}`;
+      r.lock.setAttribute("aria-pressed", String(v.locked));
+      r.lock.replaceChildren(icon(v.locked ? "lock" : "unlock"));
     }
   }
   const draft = { zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" };
-  function renderManual() {
+  function renderHand() {
     const s = deps.settings();
     if (draft.zone !== ALL_ZONES && !s.zones.includes(draft.zone))
       draft.zone = ALL_ZONES;
     const send = (intent) => engine.apply(intent, "manual");
-    manual.replaceChildren(h("div", { class: "tm-card" }, h("div", { class: "tm-row" }, select(draft.zone, [ALL_ZONES, ...s.zones], (z) => draft.zone = z, "Zone"), select(draft.feel, FEELS, (f) => draft.feel = f, "Feel"), select(draft.tempo, TEMPOS, (t) => draft.tempo = t, "Tempo")), slider("Level", draft.level, 0, 100, 1, (v) => draft.level = v), h("div", { class: "tm-row" }, button("Play", () => send({ kind: "scene", zone: draft.zone, level: draft.level, feel: draft.feel, tempo: draft.tempo }), "tm-primary"), ...ACCENTS.map((a) => button(a, () => send({ kind: "accent", zone: draft.zone, accent: a }), "tm-small")), button("Stop zone", () => send({ kind: "stop", zone: draft.zone }), "tm-small")), h("div", { class: "tm-hint" }, `Levels are capped at ${s.limits.maxLevel} and mapped onto each output's calibration. Scenes fade after ${Math.round(s.limits.holdTimeoutSec)} s without activity.`)));
+    handBox.replaceChildren(group("Play by hand", s.zones.length > 1 ? field("Zone", select(draft.zone, [[ALL_ZONES, "All zones"], ...s.zones.map((z) => [z, z])], (z) => (draft.zone = z, renderHand()), "Zone")) : null, chips(draft.feel, FEELS, (f) => (draft.feel = f, renderHand()), "Feel"), segmented(draft.tempo, TEMPOS.map((t) => [t, t]), (t) => (draft.tempo = t, renderHand()), "Tempo"), field("Level", range(draft.level, 0, 100, 1, (v) => draft.level = v, "Level")), h("div", { class: "tm-row" }, button([icon("play"), "Play"], () => send({ kind: "scene", zone: draft.zone, level: draft.level, feel: draft.feel, tempo: draft.tempo }), "primary tm-grow"), button([icon("stop"), "Stop"], () => send({ kind: "stop", zone: draft.zone }), "", "Stop this zone (not a pause)")), h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, "Add a moment:"), ...ACCENTS.map((a) => button(a, () => send({ kind: "accent", zone: draft.zone, accent: a }), "sm", `Brief ${a} on top of what is playing`))), h("p", { class: "tm-hint" }, `Capped at level ${s.limits.maxLevel} and each toy's ceiling. Fades after ${Math.round(s.limits.holdTimeoutSec)} s without activity.`)));
   }
-  let cueStatus = [];
-  function renderPlan() {
+  let cueRefs = [];
+  function renderCues() {
     const p = triggers.plan;
-    cueStatus = [];
+    cueRefs = [];
     if (p.state === "idle" && !p.detail) {
-      planBox.replaceChildren();
+      cueBox.replaceChildren();
       return;
     }
     const items = p.cues.map((c, i) => {
-      const el = h("span", { class: "tm-dim" });
-      cueStatus.push({ el, atMs: c.atMs });
-      return h("li", {}, button("▶", () => triggers.resumeFrom(i), "tm-small tm-resume", "Resume from this cue"), " ", h("b", {}, c.label), " ", el, h("span", { class: "tm-dim" }, ` · “${c.sentence}”`));
+      const state = h("span", { class: "tm-cue-state" });
+      const li = h("li", { class: "tm-cue" }, button(icon("play"), () => triggers.resumeFrom(i), "ghost icon-only", "Play from this cue"), h("b", {}, c.label), state, h("q", {}, c.sentence));
+      cueRefs.push({ li, state, atMs: c.atMs });
+      return li;
     });
-    planBox.replaceChildren(h("div", { class: "tm-card" }, h("div", { class: p.state === "failed" ? "tm-error" : "tm-dim" }, p.detail), items.length ? h("ol", { class: "tm-cues" }, ...items) : null, items.length ? h("div", { class: "tm-hint" }, "▶ plays the reply's cues again from that point, at your reading speed. It also lifts a pause.") : null));
-    updateCueStatus();
+    cueBox.replaceChildren(group("Story cues", h("p", { class: p.state === "failed" ? "tm-alert" : "tm-hint" }, p.detail), items.length ? h("ol", { class: "tm-cues" }, ...items) : null, items.length ? h("p", { class: "tm-hint" }, "Press ▶ on a cue to play the reply again from there, at your reading pace. It also ends a pause.") : null));
+    updateCues();
   }
-  function updateCueStatus() {
+  function updateCues() {
     const now = Date.now();
-    const scheduled = engine.view().pendingCues > 0;
-    for (const { el, atMs } of cueStatus)
-      el.textContent = atMs === null ? "skipped" : atMs <= now ? "played" : scheduled ? `in ${Math.ceil((atMs - now) / 1000)} s` : "stopped";
+    const v = engine.view();
+    const scheduled = v.pendingCues > 0;
+    let current = -1;
+    cueRefs.forEach((c, i) => c.atMs !== null && c.atMs <= now && (current = i));
+    if (!v.active || v.paused)
+      current = -1;
+    cueRefs.forEach((c, i) => {
+      const state = c.atMs === null ? "skipped" : i === current ? "current" : c.atMs <= now ? "played" : scheduled ? "upcoming" : "stopped";
+      c.li.dataset.state = state;
+      c.state.textContent = state === "upcoming" ? `in ${Math.ceil((c.atMs - now) / 1000)} s` : state === "current" ? "now" : state;
+    });
   }
+  const openCalibration = new Set;
   let deviceSig = "";
   const valueRefs = new Map;
   function renderDevices(force = false) {
     const v = engine.view();
     const s = deps.settings();
-    const sig = JSON.stringify([v.devices.map((d) => [d.name, d.battery, d.outputs.map((o) => o.key)]), s.zones, s.outputs, v.connection]);
+    const sig = JSON.stringify([v.devices.map((d) => [d.name, d.battery, d.outputs.map((o) => o.key)]), s.zones, s.outputs, v.connection, [...openCalibration]]);
     if (sig === deviceSig && !force) {
-      for (const [key, el] of valueRefs)
-        el.textContent = `${v.values[key] ?? 0}`;
+      for (const { fill, output } of valueRefs.values()) {
+        const value = v.values[output.key] ?? 0;
+        const [min, max] = output.range;
+        fill.style.width = `${Math.round(Math.abs(value) / Math.max(Math.abs(min), Math.abs(max), 1) * 100)}%`;
+      }
       return;
     }
     deviceSig = sig;
     valueRefs.clear();
     const setPrefs = (key, patch) => deps.update((x) => ({ ...x, outputs: { ...x.outputs, [key]: { ...prefsFor(x, key), ...patch } } }));
-    const deviceCard = (d) => h("div", { class: "tm-card" }, h("div", { class: "tm-row tm-spread" }, h("b", {}, d.name), h("span", { class: "tm-dim" }, d.battery === null ? "" : `battery ${d.battery}%`)), ...d.outputs.map((o) => {
-      const p = prefsFor(s, o.key);
-      const val = h("span", { class: "tm-dim" }, `${v.values[o.key] ?? 0}`);
-      valueRefs.set(o.key, val);
+    const outputRow = (d, o) => {
+      const kind = KIND[o.kind];
+      const sameKind = d.outputs.filter((x) => x.kind === o.kind).length > 1;
+      const label = `${kind.label}${sameKind ? ` ${o.featureIndex + 1}` : ""}`;
       if (UNDRIVEN.has(o.kind))
-        return h("div", { class: "tm-hint" }, `Feature ${o.featureIndex}: ${describeKind(o.kind)} (not driven by Toymate)`);
-      return h("div", { class: "tm-rule" }, h("div", { class: "tm-row tm-spread" }, h("span", {}, `Feature ${o.featureIndex} · ${describeKind(o.kind)} `, h("span", { class: "tm-dim" }, "now "), val, h("span", { class: "tm-dim" }, ` / ${o.range[1]}`)), select(p.zone, s.zones, (zone) => setPrefs(o.key, { zone }), "Zone")), slider("Floor (barely felt)", p.floor, 0, 100, 1, (floor) => setPrefs(o.key, { floor, ceiling: Math.max(floor, p.ceiling) }), "%"), slider("Ceiling (strongest)", p.ceiling, 0, 100, 1, (ceiling) => setPrefs(o.key, { ceiling, floor: Math.min(p.floor, ceiling) }), "%"), h("div", { class: "tm-row" }, button("Test floor", () => engine.test(o.key, 1), "tm-small", "Runs for 2 seconds at the floor"), button("Test middle", () => engine.test(o.key, 50), "tm-small"), button("Test ceiling", () => engine.test(o.key, 100), "tm-small", "Runs for 2 seconds at the ceiling (or the max level)")));
-    }));
-    devicesBody.replaceChildren(v.connection !== "connected" ? h("div", { class: "tm-hint" }, "Connect to Intiface to see devices.") : v.devices.length === 0 ? h("div", { class: "tm-hint" }, "No devices yet. Connect them in Intiface, or press Scan.") : h("div", { style: "display:flex;flex-direction:column;gap:8px" }, ...v.devices.map(deviceCard)), textField("Zones", s.zones.join(", "), (text) => deps.update((x) => ({ ...x, zones: text.split(",") }))), h("div", { class: "tm-hint" }, "Zones group outputs (for example: clit, internal, stroker). Rules and the planner address zones, never device names. Temperature outputs only follow their zone by name, never “all”."));
+        return h("div", { class: "tm-output" }, h("div", { class: "tm-output-head" }, h("span", { class: "tm-kind" }, icon(kind.icon), label), h("span", { class: "tm-hint" }, "not used by Toymate")));
+      const p = prefsFor(s, o.key);
+      const fill = h("i", {});
+      valueRefs.set(o.key, { fill, output: o });
+      const isOpen = openCalibration.has(o.key);
+      const toggleOpen = () => {
+        if (isOpen)
+          openCalibration.delete(o.key);
+        else
+          openCalibration.add(o.key);
+        renderDevices(true);
+      };
+      const disclose = button([icon("chevron"), "Calibrate"], toggleOpen, "ghost sm tm-disclose");
+      disclose.setAttribute("aria-expanded", String(isOpen));
+      return h("div", { class: "tm-output" }, h("div", { class: "tm-output-head" }, h("span", { class: "tm-kind" }, icon(kind.icon), label), h("span", { class: "tm-mini" }, fill), s.zones.length > 1 ? select(p.zone, s.zones, (zone) => setPrefs(o.key, { zone }), `Zone for ${label}`) : null), h("div", { class: "tm-row" }, s.outputs[o.key] ? h("span", { class: "tm-hint tm-grow" }, `Feels ${p.floor}–${p.ceiling}%`) : h("span", { class: "tm-grow" }, h("span", { class: "tm-badge" }, "Not calibrated")), disclose), isOpen ? h("div", { class: "tm-calibrate" }, field("Floor", range(p.floor, 0, 100, 1, (floor) => setPrefs(o.key, { floor, ceiling: Math.max(floor, p.ceiling) }), "Floor", pct), "Lowest you can feel", true), field("Ceiling", range(p.ceiling, 0, 100, 1, (ceiling) => setPrefs(o.key, { ceiling, floor: Math.min(p.floor, ceiling) }), "Ceiling", pct), "Strongest you want", true), h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, "Try it for 2 s:"), button("Floor", () => engine.test(o.key, 1), "sm"), button("Middle", () => engine.test(o.key, 50), "sm"), button("Ceiling", () => engine.test(o.key, 100), "sm"))) : null);
+    };
+    const empty = (title, body, action) => h("div", { class: "tm-empty" }, icon("plug"), h("div", {}, h("b", {}, title), h("p", { class: "tm-hint" }, body)), action);
+    bodies.devices.replaceChildren(...present(v.connection !== "connected" ? empty("Not connected", "Start the server in Intiface Central, then connect.", button("Connect", () => void engine.connect(), "primary")) : v.devices.length === 0 ? empty("No toys yet", "Turn your toy on and pair it in Intiface Central, or scan from here.", button([icon("scan"), "Scan"], () => void engine.toggleScan(), "primary")) : null), ...v.devices.map((d) => h("div", { class: "tm-device" }, h("div", { class: "tm-device-head" }, d.name, d.battery === null ? null : h("small", {}, icon("battery"), `${d.battery}%`)), ...d.outputs.map((o) => outputRow(d, o)))), zonesGroup(s));
+  }
+  function zonesGroup(s) {
+    const setZones = (zones) => deps.update((x) => ({ ...x, zones }));
+    const add = text("", (z) => z.trim() && setZones([...s.zones, z]), "New zone", "+ add zone");
+    return group("Zones", h("div", { class: "tm-zone-chips" }, ...s.zones.map((z) => h("span", { class: "tm-zone-chip" }, z, s.zones.length > 1 ? button("×", () => setZones(s.zones.filter((x) => x !== z)), "", `Remove zone ${z}`) : null)), add), h("p", { class: "tm-hint" }, "Group outputs by where you wear them, like clit, internal, or stroker. Rules and the planner use zones, never toy names."));
   }
   function renderRules() {
     const s = deps.settings();
+    const { chatId, characterId } = deps.activeChat();
     const setRules = (rules) => deps.update((x) => ({ ...x, rules }));
     const patch = (i, r) => setRules(s.rules.map((x, j) => j === i ? { ...x, ...r } : x));
-    const thenEditor = (rule, i) => {
+    const newRule = (over = {}) => ({
+      id: crypto.randomUUID(),
+      enabled: true,
+      when: "character_message",
+      match: "",
+      characterId: null,
+      then: { kind: "scene", zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" },
+      ...over
+    });
+    const zoneOpts = [[ALL_ZONES, "all zones"], ...s.zones.map((z) => [z, z])];
+    const thenRow = (rule, i) => {
       const t = rule.then;
-      const action = t.kind;
       const setThen = (then) => patch(i, { then });
-      const zone = select(t.zone, [ALL_ZONES, ...s.zones], (zone) => setThen({ ...t, zone }), "Zone");
-      const kindSel = select(action, ["scene", "accent", "stop"], (k) => setThen(k === "scene" ? { kind: "scene", zone: t.zone, level: 40, feel: "wave", tempo: "medium" } : k === "accent" ? { kind: "accent", zone: t.zone, accent: "spike" } : { kind: "stop", zone: t.zone }));
-      if (t.kind === "scene")
-        return h("div", { class: "tm-row" }, kindSel, zone, h("input", { class: "tm-input tm-num", type: "number", min: -100, max: 100, value: t.level ?? t.delta ?? 0, title: "Level 0-100", onchange: (e) => setThen({ ...t, level: Number(e.target.value) }) }), select(t.feel ?? "steady", FEELS, (feel) => setThen({ ...t, feel }), "Feel"), select(t.tempo ?? "medium", TEMPOS, (tempo) => setThen({ ...t, tempo }), "Tempo"));
-      if (t.kind === "accent")
-        return h("div", { class: "tm-row" }, kindSel, zone, select(t.accent, ACCENTS, (accent) => setThen({ ...t, accent }), "Accent"));
-      return h("div", { class: "tm-row" }, kindSel, zone);
+      const kind = select(t.kind, [["scene", "play"], ["accent", "accent"], ["stop", "stop"]], (k) => setThen(k === "scene" ? { kind: "scene", zone: t.zone, level: 40, feel: "wave", tempo: "medium" } : k === "accent" ? { kind: "accent", zone: t.zone, accent: "spike" } : { kind: "stop", zone: t.zone }), "Action");
+      const zone = select(t.zone, zoneOpts, (z) => setThen({ ...t, zone: z }), "Zone");
+      const what = t.kind === "scene" ? [select(t.feel ?? "steady", FEELS, (feel) => setThen({ ...t, feel }), "Feel"), select(t.tempo ?? "medium", TEMPOS, (tempo) => setThen({ ...t, tempo }), "Tempo")] : t.kind === "accent" ? [select(t.accent, ACCENTS, (accent) => setThen({ ...t, accent }), "Accent")] : [];
+      return [
+        h("div", { class: "tm-then" }, h("span", { class: "tm-word" }, "then"), kind, ...what),
+        h("div", { class: "tm-then tm-then-where" }, ...t.kind === "scene" ? [h("span", { class: "tm-word" }, "at"), number(t.level ?? 0, 0, 100, (level) => setThen({ ...t, level }), "Level")] : [h("span", {}), h("span", {})], h("span", { class: "tm-word" }, "on"), zone)
+      ];
     };
-    rulesBody.replaceChildren(h("div", { class: "tm-hint" }, "Rules run in chats set to Reactive. Match: comma-separated keywords, or /regex/i. Empty matches everything."), ...s.rules.map((rule, i) => h("div", { class: "tm-rule" }, h("div", { class: "tm-row tm-spread" }, toggle("Enabled", rule.enabled, (enabled) => patch(i, { enabled })), select(rule.when, RULE_TRIGGERS.map((w) => [w, TRIGGER_LABELS[w]]), (when) => patch(i, { when })), button("Delete", () => setRules(s.rules.filter((_, j) => j !== i)), "tm-small tm-danger-text")), textField("Match", rule.match, (match) => patch(i, { match }), "kiss, touch  or  /moan(s|ed)?/i"), thenEditor(rule, i))), h("div", { class: "tm-row" }, button("Add rule", () => setRules([...s.rules, { id: crypto.randomUUID(), enabled: true, when: "character_message", match: "", characterId: null, then: { kind: "scene", zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" } }]))), toggle("Stream pulse: pulse while the reply streams (Reactive chats)", s.streamPulse, (streamPulse) => deps.update((x) => ({ ...x, streamPulse }))));
+    const mode = modeFor(s, chatId, characterId);
+    bodies.rules.replaceChildren(...present(chatId && mode !== "reactive" ? h("div", { class: "tm-empty" }, h("p", { class: "tm-hint" }, `Rules only run in chats set to Reactive. This chat is ${mode === "story" ? "in Story mode" : "Off"}.`), button("Use Reactive here", () => deps.update((x) => withChatMode(x, chatId, characterId, "reactive")), "sm")) : null), group("Rules", ...s.rules.length ? s.rules.map((rule, i) => h("div", { class: "tm-rule", "data-off": String(!rule.enabled) }, h("div", { class: "tm-row tm-nowrap" }, toggle(rule.enabled, (enabled) => patch(i, { enabled }), "Rule on or off"), h("span", { class: "tm-word" }, "When"), select(rule.when, RULE_TRIGGERS.map((w) => [w, TRIGGER_LABELS[w]]), (when) => patch(i, { when }), "When"), button(icon("trash"), () => setRules(s.rules.filter((_, j) => j !== i)), "ghost icon-only danger-text", "Delete rule")), h("div", { class: "tm-row" }, h("span", { class: "tm-word" }, "with"), text(rule.match, (match) => patch(i, { match }), "Match", "any text · or: kiss, touch · or /moan(s|ed)?/i")), ...thenRow(rule, i))) : [h("p", { class: "tm-hint" }, "No rules yet. A rule like “when a reply mentions kiss, play a slow wave at 40” is a good start.")], h("div", { class: "tm-row" }, button([icon("plus"), "Add rule"], () => setRules([...s.rules, newRule()]), "sm"), s.rules.length ? null : button("Add the example", () => setRules([newRule({ match: "kiss, touch, caress", then: { kind: "scene", zone: ALL_ZONES, level: 40, feel: "wave", tempo: "slow" } })]), "ghost sm"))), group("While replies stream", field("Stream pulse", toggle(s.streamPulse, (streamPulse) => deps.update((x) => ({ ...x, streamPulse })), "Stream pulse"), "Pulse along with the text as it is written")));
   }
-  function renderStory() {
-    const s = deps.settings();
-    const conns = deps.connections();
-    const options = [["", "Active connection"], ...(conns ?? []).map((c) => [c.id, `${c.name} (${c.model})`])];
-    if (s.story.connectionId && !options.some(([id]) => id === s.story.connectionId))
-      options.push([s.story.connectionId, "Saved connection (not found)"]);
-    storyBody.replaceChildren(h("div", { class: "tm-hint" }, "In Story chats, a separate planner call reads each finished reply and schedules cues as you read. Messages stay clean."), h("label", { class: "tm-field tm-field-wide" }, h("span", {}, "Planner connection"), select(s.story.connectionId ?? "", options, (id) => deps.update((x) => ({ ...x, story: { ...x.story, connectionId: id || null } })), "Planner connection")), ...conns === null ? [button("Load connections", () => deps.requestConnections(), "tm-small")] : [], h("div", { class: "tm-hint" }, "Each reply's text is sent to this connection's provider. Pick the provider you already use for roleplay, or a local model. A small fast model is enough; it must support tool calling or JSON output."), numberField("Reading speed (chars/s)", s.story.readingCps, 3, 100, (readingCps) => deps.update((x) => ({ ...x, story: { ...x.story, readingCps } }))), toggle("Character awareness: tell the roleplay model about the devices", s.story.awareness, (awareness) => deps.update((x) => ({ ...x, story: { ...x.story, awareness } }))));
-  }
-  function renderSafety() {
+  function renderSettings() {
     const s = deps.settings();
     const L = s.limits;
-    const setL = (patch) => deps.update((x) => ({ ...x, limits: { ...x.limits, ...patch } }));
-    safetyBody.replaceChildren(slider("Max level", L.maxLevel, 0, 100, 1, (maxLevel) => setL({ maxLevel })), slider("Ramp (levels/s)", L.rampPerSecond, 5, 200, 5, (rampPerSecond) => setL({ rampPerSecond })), numberField("Fade after idle (s)", L.holdTimeoutSec, 10, 3600, (holdTimeoutSec) => setL({ holdTimeoutSec })), toggle("Stop all when a generation is stopped", L.stopOnGenerationStop, (stopOnGenerationStop) => setL({ stopOnGenerationStop })), h("b", {}, "Strokers"), slider("Max stroke speed", L.strokeMaxSpeed, 0.1, 5, 0.1, (strokeMaxSpeed) => setL({ strokeMaxSpeed }), "/s"), slider("Stroke range min", L.strokeMin, 0, 100, 1, (strokeMin) => setL({ strokeMin, strokeMax: Math.max(strokeMin, L.strokeMax) }), "%"), slider("Stroke range max", L.strokeMax, 0, 100, 1, (strokeMax) => setL({ strokeMax, strokeMin: Math.min(L.strokeMin, strokeMax) }), "%"), h("b", {}, "Other devices"), numberField("Air pump max hold (s)", L.constrictMaxHoldSec, 2, 600, (constrictMaxHoldSec) => setL({ constrictMaxHoldSec })), slider("Temperature cap", L.temperatureMax, 0, 100, 1, (temperatureMax) => setL({ temperatureMax }), "%"), numberField("Rotation swap min (ms)", L.rotateSwapMinMs, 200, 60000, (rotateSwapMinMs) => setL({ rotateSwapMinMs })), h("b", {}, "Safewords"), textField("Stop everything", s.safewords.stop, (stop) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, stop } }))), textField("Slow down", s.safewords.ease, (ease) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, ease } }))), h("div", { class: "tm-hint" }, `Send a safeword as the whole message or out of character, e.g. “(${s.safewords.stop})” or “OOC: ${s.safewords.stop}”. Stop pauses Toymate and leaves Story mode. Shift+Esc stops everything from anywhere.`));
+    const setL = (p) => deps.update((x) => ({ ...x, limits: { ...x.limits, ...p } }));
+    const setStory = (p) => deps.update((x) => ({ ...x, story: { ...x.story, ...p } }));
+    const conns = deps.connections();
+    const connOpts = [["", "Active connection"], ...(conns ?? []).map((c) => [c.id, `${c.name} · ${c.model}`])];
+    if (s.story.connectionId && !connOpts.some(([id]) => id === s.story.connectionId))
+      connOpts.push([s.story.connectionId, "Saved connection (missing)"]);
+    bodies.settings.replaceChildren(group("Safety", field("Max level", range(L.maxLevel, 0, 100, 1, (maxLevel) => setL({ maxLevel }), "Max level"), "Nothing goes above this", true), field("Ramp speed", range(L.rampPerSecond, 5, 200, 5, (rampPerSecond) => setL({ rampPerSecond }), "Ramp", (v) => `${v}/s`), "How fast intensity may rise", true), field("Fade after", number(L.holdTimeoutSec, 10, 3600, (holdTimeoutSec) => setL({ holdTimeoutSec }), "Fade after seconds"), "Seconds without new activity"), field("Stop when I stop a reply", toggle(L.stopOnGenerationStop, (stopOnGenerationStop) => setL({ stopOnGenerationStop }), "Stop when I stop a reply"))), group("Safewords", field("Stop everything", text(s.safewords.stop, (stop) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, stop } })), "Stop safeword")), field("Slow down", text(s.safewords.ease, (ease) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, ease } })), "Slow-down safeword")), h("p", { class: "tm-hint" }, `Send one as the whole message or out of character, like “(${s.safewords.stop})” or “OOC: ${s.safewords.stop}”. Stop pauses Toymate and turns Story mode off for the chat.`)), group("Story planner", field("Connection", select(s.story.connectionId ?? "", connOpts, (id) => setStory({ connectionId: id || null }), "Planner connection"), undefined, true), conns === null ? button("Load connections", () => deps.requestConnections(), "ghost sm") : null, h("p", { class: "tm-hint" }, "Each reply is sent to this connection. Use the provider you already roleplay with, or a local model. A small, fast, non-thinking model works best."), field("Reading speed", number(s.story.readingCps, 3, 100, (readingCps) => setStory({ readingCps }), "Reading speed"), "Characters per second; cues follow it"), field("Character awareness", toggle(s.story.awareness, (awareness) => setStory({ awareness }), "Character awareness"), "Tell the roleplay model about your toys")), group("Strokers", field("Max speed", range(L.strokeMaxSpeed, 0.1, 5, 0.1, (strokeMaxSpeed) => setL({ strokeMaxSpeed }), "Max stroke speed", (v) => `${v}/s`), "Full strokes per second", true), field("Lowest point", range(L.strokeMin, 0, 100, 1, (strokeMin) => setL({ strokeMin, strokeMax: Math.max(strokeMin, L.strokeMax) }), "Stroke range min", pct), undefined, true), field("Highest point", range(L.strokeMax, 0, 100, 1, (strokeMax) => setL({ strokeMax, strokeMin: Math.min(L.strokeMin, strokeMax) }), "Stroke range max", pct), undefined, true)), group("Other toys", field("Air pump max hold", number(L.constrictMaxHoldSec, 2, 600, (constrictMaxHoldSec) => setL({ constrictMaxHoldSec }), "Air pump max hold"), "Seconds before it releases"), field("Warmth cap", range(L.temperatureMax, 0, 100, 1, (temperatureMax) => setL({ temperatureMax }), "Warmth cap", pct), undefined, true), field("Direction change gap", number(L.rotateSwapMinMs, 200, 60000, (rotateSwapMinMs) => setL({ rotateSwapMinMs }), "Rotation direction change gap"), "Milliseconds between reversals")), group("Connection", field("Intiface address", text(s.intifaceUrl, (intifaceUrl) => deps.update((x) => ({ ...x, intifaceUrl: intifaceUrl.trim() })), "Intiface address", "ws://127.0.0.1:12345"), undefined, true), field("Connect automatically", toggle(s.autoConnect, (autoConnect) => deps.update((x) => ({ ...x, autoConnect })), "Connect automatically"), "When Lumiverse opens")));
   }
-  function renderConnection() {
-    const s = deps.settings();
-    connectionBody.replaceChildren(textField("Intiface URL", s.intifaceUrl, (intifaceUrl) => deps.update((x) => ({ ...x, intifaceUrl: intifaceUrl.trim() })), "ws://127.0.0.1:12345"), toggle("Connect automatically when Lumiverse opens", s.autoConnect, (autoConnect) => deps.update((x) => ({ ...x, autoConnect }))), h("div", { class: "tm-hint" }, "Toymate connects from this browser to Intiface Central on this device. Start the server in Intiface first."));
-  }
-  const renderSettings = () => {
+  const settingsChanged = () => {
     renderMode();
-    renderManual();
+    renderHand();
     renderDevices(true);
     renderRules();
-    renderStory();
-    renderSafety();
-    renderConnection();
+    renderSettings();
+    renderHeader();
   };
-  renderHeader();
-  renderMeters();
-  renderPlan();
-  renderSettings();
+  setTab(tab);
+  settingsChanged();
+  renderZones();
+  renderCues();
   const unsubEngine = engine.subscribe(() => {
     renderHeader();
-    renderMeters();
+    renderZones();
     renderDevices();
   });
-  const unsubPlan = triggers.onPlanChange(renderPlan);
-  const planTimer = setInterval(updateCueStatus, 1000);
+  const unsubPlan = triggers.onPlanChange(renderCues);
+  const cueTimer = setInterval(updateCues, 1000);
   return {
-    settingsChanged: renderSettings,
-    chatChanged: renderMode,
+    settingsChanged,
+    chatChanged() {
+      renderMode();
+      renderRules();
+    },
     dispose() {
       unsubEngine();
       unsubPlan();
-      clearInterval(planTimer);
+      clearInterval(cueTimer);
       root.replaceChildren();
     }
   };
@@ -3309,45 +3421,147 @@ function mountPanel(root, deps) {
 
 // src/frontend/ui/styles.ts
 var PANEL_CSS = `
-.tm-panel { display: flex; flex-direction: column; gap: 10px; padding: 10px; color: var(--lumiverse-text); font-size: calc(13px * var(--lumiverse-font-scale, 1)); }
-.tm-panel * { box-sizing: border-box; }
-.tm-head { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-bg-elevated, var(--lumiverse-fill-subtle)); }
-.tm-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.tm-row.tm-spread { justify-content: space-between; }
-.tm-status { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
-.tm-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--lumiverse-text-muted); }
-.tm-dot[data-state="connected"] { background: var(--lumiverse-success, #3fb950); }
-.tm-dot[data-state="connecting"] { background: var(--lumiverse-warning); }
-.tm-dot[data-active="true"] { box-shadow: 0 0 0 3px var(--lumiverse-primary-020); background: var(--lumiverse-primary); }
-.tm-btn { padding: 5px 10px; border-radius: var(--lumiverse-radius, 6px); border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill); color: var(--lumiverse-text); cursor: pointer; font: inherit; }
+.tm { --tm-r: 10px; --tm-gap: 12px; --tm-ok: var(--lumiverse-success, #3fb950); display: flex; flex-direction: column; gap: var(--tm-gap); padding: 12px; color: var(--lumiverse-text); font-size: calc(13px * var(--lumiverse-font-scale, 1)); line-height: 1.4; }
+.tm * { box-sizing: border-box; }
+.tm [hidden] { display: none !important; }
+.tm-icon { display: inline-flex; width: 1.15em; height: 1.15em; flex: none; }
+.tm-icon svg { width: 100%; height: 100%; }
+
+/* buttons */
+.tm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill); color: var(--lumiverse-text); font: inherit; font-weight: 500; cursor: pointer; transition: background var(--lumiverse-transition-fast, .12s), border-color var(--lumiverse-transition-fast, .12s); }
 .tm-btn:hover:not(:disabled) { background: var(--lumiverse-fill-hover); border-color: var(--lumiverse-border-hover); }
-.tm-btn:disabled { opacity: .5; cursor: default; }
-.tm-btn.tm-primary { background: var(--lumiverse-primary); color: var(--lumiverse-primary-contrast, #fff); border-color: transparent; }
-.tm-btn.tm-stop { width: 100%; padding: 10px; font-size: 1.1em; font-weight: 700; letter-spacing: .04em; background: var(--lumiverse-danger); color: #fff; border-color: transparent; }
-.tm-btn.tm-small { padding: 2px 8px; font-size: .9em; }
-.tm-btn.tm-danger-text { color: var(--lumiverse-danger); }
-.tm-error { color: var(--lumiverse-danger); font-size: .92em; }
-.tm-dim { color: var(--lumiverse-text-dim); font-size: .92em; }
-.tm-hint { color: var(--lumiverse-text-muted); font-size: .88em; line-height: 1.35; }
-.tm-mode[data-mode="story"], .tm-mode[data-mode="reactive"] { color: var(--lumiverse-primary-text, var(--lumiverse-primary)); font-weight: 600; }
-.tm-section { border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-fill-subtle); }
-.tm-section > summary { cursor: pointer; padding: 8px 10px; font-weight: 600; }
-.tm-section > div { display: flex; flex-direction: column; gap: 8px; padding: 0 10px 10px; }
-.tm-field { display: grid; grid-template-columns: 9em 1fr auto; align-items: center; gap: 6px; }
-.tm-field-wide { grid-template-columns: 9em 1fr; }
-.tm-field input[type="range"] { width: 100%; accent-color: var(--lumiverse-primary); }
-.tm-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-.tm-toggle input { accent-color: var(--lumiverse-primary); }
-.tm-input { padding: 4px 6px; border-radius: 6px; border: 1px solid var(--lumiverse-border); background: var(--lumiverse-bg); color: var(--lumiverse-text); font: inherit; min-width: 0; }
-.tm-num { width: 5.5em; }
-.tm-card { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--lumiverse-border-light, var(--lumiverse-border)); border-radius: 6px; background: var(--lumiverse-bg); }
-.tm-meter { position: relative; height: 8px; border-radius: 4px; background: var(--lumiverse-fill); overflow: hidden; flex: 1; min-width: 60px; }
-.tm-meter > i { position: absolute; inset: 0 auto 0 0; background: var(--lumiverse-primary); }
-.tm-meter > b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--lumiverse-text-dim); }
-.tm-zone { display: grid; grid-template-columns: 6em 1fr auto auto; align-items: center; gap: 8px; }
-.tm-cues { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 3px; }
-.tm-resume { padding: 0 6px; margin-right: 2px; }
-.tm-rule { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 6px; border: 1px solid var(--lumiverse-border-light, var(--lumiverse-border)); }
+.tm-btn:focus-visible, .tm-seg button:focus-visible, .tm-chips button:focus-visible, .tm-tabs button:focus-visible { outline: 2px solid var(--lumiverse-primary); outline-offset: 2px; }
+.tm-btn:disabled { opacity: .45; cursor: default; }
+.tm-btn.primary { background: var(--lumiverse-primary); border-color: transparent; color: var(--lumiverse-primary-contrast, #fff); }
+.tm-btn.primary:hover:not(:disabled) { background: var(--lumiverse-primary); filter: brightness(1.08); }
+.tm-btn.ghost { background: transparent; border-color: transparent; color: var(--lumiverse-text-dim); }
+.tm-btn.ghost:hover:not(:disabled) { color: var(--lumiverse-text); background: var(--lumiverse-fill-subtle); }
+.tm-btn.sm { padding: 3px 9px; font-size: .92em; border-radius: 7px; }
+.tm-btn.icon-only { padding: 5px; }
+.tm-btn.danger-text { color: var(--lumiverse-danger); }
+
+/* header */
+.tm-top { display: flex; flex-direction: column; gap: 10px; }
+.tm-conn { display: flex; align-items: center; gap: 8px; }
+.tm-conn-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.tm-conn-text b { font-weight: 600; }
+.tm-conn-text small { color: var(--lumiverse-text-muted); font-size: .88em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--lumiverse-text-muted); transition: background .2s, box-shadow .2s; }
+.tm-dot[data-state="connected"] { background: var(--tm-ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--tm-ok) 22%, transparent); }
+.tm-dot[data-state="connecting"] { background: var(--lumiverse-warning); }
+.tm-dot[data-active="true"] { background: var(--lumiverse-primary); box-shadow: 0 0 0 3px var(--lumiverse-primary-020); }
+.tm-stop { width: 100%; padding: 12px; border-radius: var(--tm-r); border: none; background: var(--lumiverse-danger); color: #fff; font-size: 1.08em; font-weight: 700; letter-spacing: .06em; }
+.tm-stop:hover:not(:disabled) { background: var(--lumiverse-danger); filter: brightness(1.08); }
+.tm-stop small { font-weight: 500; letter-spacing: 0; opacity: .75; font-size: .78em; }
+.tm-paused { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--tm-r); background: color-mix(in srgb, var(--lumiverse-warning) 14%, transparent); border: 1px solid color-mix(in srgb, var(--lumiverse-warning) 45%, transparent); }
+.tm-paused div { flex: 1; display: flex; flex-direction: column; }
+.tm-paused small { color: var(--lumiverse-text-dim); }
+.tm-alert { padding: 8px 10px; border-radius: 8px; font-size: .92em; color: var(--lumiverse-danger); background: color-mix(in srgb, var(--lumiverse-danger) 10%, transparent); }
+
+/* tabs */
+.tm-tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; padding: 3px; border-radius: var(--tm-r); background: var(--lumiverse-fill-subtle); border: 1px solid var(--lumiverse-border); }
+.tm-tabs button { padding: 6px 4px; border: none; border-radius: 7px; background: transparent; color: var(--lumiverse-text-dim); font: inherit; font-weight: 500; cursor: pointer; }
+.tm-tabs button.on { background: var(--lumiverse-bg-elevated, var(--lumiverse-fill)); color: var(--lumiverse-text); box-shadow: 0 1px 2px rgb(0 0 0 / .18); }
+.tm-tab { display: flex; flex-direction: column; gap: var(--tm-gap); }
+
+/* groups and fields */
+.tm-group { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: var(--tm-r); border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); }
+.tm-group > h3 { margin: 0; font-size: .78em; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--lumiverse-text-muted); display: flex; align-items: center; gap: 8px; }
+.tm-group > h3 .tm-btn { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.tm-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.tm-field.tm-stacked { flex-direction: column; align-items: stretch; gap: 6px; }
+.tm-field-label { display: flex; flex-direction: column; min-width: 0; }
+.tm-field-label small, .tm-hint { color: var(--lumiverse-text-muted); font-size: .88em; }
+.tm-hint { margin: 0; line-height: 1.45; }
+.tm-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tm-grow { flex: 1; min-width: 0; }
+
+/* inputs */
+.tm-input { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--lumiverse-border); background: var(--lumiverse-bg); color: var(--lumiverse-text); font: inherit; min-width: 0; }
+.tm-input:focus { outline: none; border-color: var(--lumiverse-primary); box-shadow: 0 0 0 3px var(--lumiverse-primary-015, transparent); }
+.tm-num { width: 5.5em; text-align: right; }
+.tm-range { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 120px; }
+.tm .tm-range input[type="range"] { flex: 1; min-width: 0; height: 6px; min-height: 0; padding: 0; margin: 8px 0; border-radius: 3px; -webkit-appearance: none; appearance: none; cursor: pointer; background: linear-gradient(to right, var(--lumiverse-primary) var(--tm-fill, 0%), var(--lumiverse-fill-hover, var(--lumiverse-border)) var(--tm-fill, 0%)); }
+.tm-range input::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--lumiverse-primary); border: 3px solid var(--lumiverse-bg); box-shadow: 0 0 0 1px var(--lumiverse-primary); }
+.tm-range input::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--lumiverse-primary); border: 3px solid var(--lumiverse-bg); box-shadow: 0 0 0 1px var(--lumiverse-primary); }
+.tm-range input:focus-visible { outline: 2px solid var(--lumiverse-primary); outline-offset: 4px; }
+.tm-range-value { min-width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; color: var(--lumiverse-text-dim); }
+.tm-switch { position: relative; display: inline-flex; flex: none; cursor: pointer; }
+.tm-switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.tm-switch-track { width: 36px; height: 20px; border-radius: 10px; background: var(--lumiverse-fill-hover, var(--lumiverse-border)); transition: background .15s; position: relative; }
+.tm-switch-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgb(0 0 0 / .3); }
+.tm-switch input:checked + .tm-switch-track { background: var(--lumiverse-primary); }
+.tm-switch input:checked + .tm-switch-track::after { transform: translateX(16px); }
+.tm-switch input:focus-visible + .tm-switch-track { outline: 2px solid var(--lumiverse-primary); outline-offset: 2px; }
+
+/* segmented + chips */
+.tm-seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; padding: 3px; border-radius: 9px; background: var(--lumiverse-bg); border: 1px solid var(--lumiverse-border); }
+.tm-seg button { padding: 6px 8px; border: none; border-radius: 6px; background: transparent; color: var(--lumiverse-text-dim); font: inherit; font-weight: 500; cursor: pointer; }
+.tm-seg button.on { background: var(--lumiverse-primary); color: var(--lumiverse-primary-contrast, #fff); }
+.tm-seg.big button { padding: 8px; font-weight: 600; }
+.tm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tm-chips button { padding: 4px 11px; border-radius: 999px; border: 1px solid var(--lumiverse-border); background: var(--lumiverse-bg); color: var(--lumiverse-text-dim); font: inherit; cursor: pointer; }
+.tm-chips button:hover { border-color: var(--lumiverse-border-hover); color: var(--lumiverse-text); }
+.tm-chips button.on { border-color: var(--lumiverse-primary); background: var(--lumiverse-primary); color: var(--lumiverse-primary-contrast, #fff); }
+
+/* live zones */
+.tm-zones { display: flex; flex-direction: column; gap: 8px; }
+.tm-zone { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; gap: 6px 10px; align-items: center; padding: 10px 12px; border-radius: var(--tm-r); background: var(--lumiverse-bg); border: 1px solid var(--lumiverse-border); }
+.tm-zone-name { font-weight: 600; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.tm-zone-name small { font-weight: 400; color: var(--lumiverse-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-zone-level { font-size: 1.5em; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; line-height: 1; }
+.tm-zone[data-idle="true"] .tm-zone-level { color: var(--lumiverse-text-muted); }
+.tm-bar { grid-column: 1 / -1; position: relative; height: 8px; border-radius: 4px; background: var(--lumiverse-fill); overflow: hidden; }
+.tm-bar > i { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: linear-gradient(90deg, var(--lumiverse-primary-050, var(--lumiverse-primary)), var(--lumiverse-primary)); transition: width .12s linear; }
+.tm-bar > b { position: absolute; top: -2px; bottom: -2px; width: 2px; border-radius: 1px; background: var(--lumiverse-text); opacity: .55; transition: left .2s; }
+.tm-zone .tm-lock[aria-pressed="true"] { color: var(--lumiverse-warning); }
+.tm-reactions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.tm-reactions .tm-btn { padding: 7px 4px; }
+
+/* cue timeline */
+.tm-cues { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+.tm-cue { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 8px; align-items: center; padding: 6px 6px 6px 4px; border-radius: 8px; border-left: 3px solid transparent; }
+.tm-cue .tm-btn { grid-row: span 2; }
+.tm-cue b { font-weight: 600; font-size: .95em; }
+.tm-cue q { grid-column: 2 / -1; color: var(--lumiverse-text-dim); font-size: .9em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; quotes: "“" "”"; }
+.tm-cue-state { font-size: .82em; color: var(--lumiverse-text-muted); font-variant-numeric: tabular-nums; }
+.tm-cue[data-state="current"] { background: var(--lumiverse-primary-010, var(--lumiverse-fill-subtle)); border-left-color: var(--lumiverse-primary); }
+.tm-cue[data-state="current"] .tm-cue-state { color: var(--lumiverse-primary-text, var(--lumiverse-primary)); font-weight: 600; }
+.tm-cue[data-state="skipped"], .tm-cue[data-state="played"] { opacity: .55; }
+.tm-cue[data-state="stopped"] .tm-cue-state { color: var(--lumiverse-warning); }
+
+/* devices */
+.tm-device { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--tm-r); border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); }
+.tm-device-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.tm-device-head small { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-weight: 400; color: var(--lumiverse-text-dim); }
+.tm-output { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 8px; background: var(--lumiverse-bg); border: 1px solid var(--lumiverse-border-light, var(--lumiverse-border)); }
+.tm-output-head { display: flex; align-items: center; gap: 8px; }
+.tm-output-head .tm-kind { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.tm-output-head .tm-mini { flex: 1; height: 6px; border-radius: 3px; background: var(--lumiverse-fill); overflow: hidden; position: relative; min-width: 40px; }
+.tm-output-head .tm-mini i { position: absolute; inset: 0 auto 0 0; background: var(--lumiverse-primary); transition: width .12s linear; }
+.tm-badge { font-size: .78em; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--lumiverse-warning) 18%, transparent); color: var(--lumiverse-warning); white-space: nowrap; }
+.tm-calibrate { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px dashed var(--lumiverse-border); }
+.tm-disclose { display: inline-flex; align-items: center; gap: 4px; }
+.tm-disclose .tm-icon { transition: transform .15s; }
+.tm-disclose[aria-expanded="true"] .tm-icon { transform: rotate(90deg); }
+.tm-zone-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tm-zone-chip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 4px 2px 10px; border-radius: 999px; background: var(--lumiverse-bg); border: 1px solid var(--lumiverse-border); }
+.tm-zone-chip .tm-btn { padding: 1px 4px; border: none; background: none; color: var(--lumiverse-text-muted); }
+.tm-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: 20px 12px; border-radius: var(--tm-r); border: 1px dashed var(--lumiverse-border); color: var(--lumiverse-text-dim); }
+.tm-empty .tm-icon { width: 28px; height: 28px; color: var(--lumiverse-text-muted); }
+
+/* rules */
+.tm-rule { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 8px; background: var(--lumiverse-bg); border: 1px solid var(--lumiverse-border-light, var(--lumiverse-border)); }
+.tm-rule[data-off="true"] { opacity: .6; }
+.tm-rule .tm-word { color: var(--lumiverse-text-muted); font-size: .9em; min-width: 2.6em; }
+.tm-rule input[type="text"] { flex: 1; }
+.tm-rule .tm-num { width: 100%; }
+.tm-then { display: grid; grid-template-columns: 2.6em 1fr 1fr 1fr; gap: 6px; align-items: center; }
+.tm-then > select { width: 100%; }
+.tm-then-where { grid-template-columns: 2.6em 1fr auto 2fr; }
+.tm-then .tm-word { min-width: 0; }
+.tm-nowrap { flex-wrap: nowrap; }
+.tm-nowrap select.tm-input { flex: 1; min-width: 0; }
 `;
 
 // src/frontend.ts

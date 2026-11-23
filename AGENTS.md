@@ -58,6 +58,7 @@ The common defect is a change that works on the path you tested and is missing e
 ## Pull requests and commits
 
 - Never commit, push, or open a PR unless the developer asks.
+- Every push bumps the version with `bun run bump <patch|minor|major>`, which keeps `spindle.json` and `package.json` in sync. Lumiverse shows the manifest version when it offers an update. Before 1.0: `minor` for user-visible features, `patch` for fixes and internal changes. One bump per push, in its own commit or the last commit of the push.
 - `dist/` is committed: Lumiverse installs prebuilt bundles and does not rebuild on update when `dist/` exists. Run `bun run build` before committing source changes; `bun run check:dist` fails if `dist/` is stale.
 - Conventional commit titles in plain language: `fix(engine): stop all outputs when Intiface disconnects`.
 - PR body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.

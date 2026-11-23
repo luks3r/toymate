@@ -1,10 +1,10 @@
-import { ACCENTS, ALL_ZONES, FEELS, TEMPOS, type Accent, type Feel, type Intent, type Tempo } from "../../shared/intent";
-import { DEFAULT_OUTPUT_PREFS, MODES, RULE_TRIGGERS, prefsFor, type Mode, type Rule, type Settings } from "../../shared/settings";
+import { ACCENTS, ALL_ZONES, FEELS, TEMPOS, type Feel, type Intent, type Tempo } from "../../shared/intent";
+import { DEFAULT_OUTPUT_PREFS, RULE_TRIGGERS, modeFor, prefsFor, withChatMode, type Mode, type Rule, type Settings } from "../../shared/settings";
 import type { ConnectionSummary } from "../../shared/wire";
-import { describeKind, type DeviceInfo, UNDRIVEN } from "../engine/devices";
+import { UNDRIVEN, type DeviceInfo, type OutputInfo, type OutputKind } from "../engine/devices";
 import type { Engine } from "../engine/engine";
 import type { Triggers } from "../triggers/wiring";
-import { button, h, numberField, section, select, slider, textField, toggle } from "./dom";
+import { button, chips, field, group, h, icon, number, range, segmented, select, text, toggle, type IconName } from "./dom";
 
 export interface PanelDeps {
   engine: Engine;
@@ -16,416 +16,596 @@ export interface PanelDeps {
   requestConnections(): void;
 }
 
-const MODE_LABELS: Record<Mode, string> = { off: "Off", reactive: "Reactive (rules)", story: "Story (planner)" };
-const TRIGGER_LABELS = { character_message: "Character reply finished", user_message: "User message sent", streaming: "While reply streams" } as const;
+type Tab = "play" | "devices" | "rules" | "settings";
+const TABS: readonly (readonly [Tab, string])[] = [
+  ["play", "Play"],
+  ["devices", "Devices"],
+  ["rules", "Rules"],
+  ["settings", "Settings"],
+];
 
+const MODE_HINT: Record<Mode, string> = {
+  off: "Nothing moves on its own. You can still play by hand below.",
+  reactive: "Your rules react to new replies and messages.",
+  story: "After each reply, a planner reads it and plays cues as you read.",
+};
+const TRIGGER_LABELS = { character_message: "a reply finishes", user_message: "I send a message", streaming: "a reply is streaming" } as const;
+
+const KIND: Record<OutputKind, { label: string; icon: IconName }> = {
+  Vibrate: { label: "Vibrate", icon: "vibrate" },
+  Rotate: { label: "Rotate", icon: "rotate" },
+  Oscillate: { label: "Thrust", icon: "stroke" },
+  Constrict: { label: "Squeeze", icon: "air" },
+  Inflate: { label: "Inflate", icon: "air" },
+  HwPositionWithDuration: { label: "Stroke", icon: "stroke" },
+  Position: { label: "Position", icon: "stroke" },
+  Temperature: { label: "Warmth", icon: "heat" },
+  Spray: { label: "Spray", icon: "dot" },
+  Led: { label: "Light", icon: "dot" },
+};
+
+const pct = (v: number) => `${v}%`;
+const present = (...children: (Node | null)[]) => children.filter((c): c is Node => c !== null);
+
+/**
+ * Sidebar UI. Header, zone meters, device values, and cue status are built once
+ * and updated in place; everything else rebuilds only when settings, devices,
+ * or the plan change, so controls never move under a click.
+ */
 export function mountPanel(root: HTMLElement, deps: PanelDeps) {
   const { engine, triggers } = deps;
-  const open = new Set(["live", "devices"]);
-  const sec = (id: string, title: string, body: HTMLElement) =>
-    section(title, open.has(id), (o) => (o ? open.add(id) : open.delete(id)), body);
+  let tab: Tab = "play";
 
-  // ── header: built once, updated in place so buttons never move under a click ──
+  // ── header ─────────────────────────────────────────────────────────────
   const dot = h("span", { class: "tm-dot" });
-  const statusText = h("span", {});
-  const connectBtn = button("Connect", () => void (engine.view().connection === "connected" ? engine.disconnect() : engine.connect()), "tm-primary");
-  const scanBtn = button("Scan", () => void engine.toggleScan());
-  const stopBtn = button("STOP ALL", () => void engine.panic(), "tm-stop", "Stop every device and pause Toymate (Shift+Esc)");
-  const resumeBtn = button("Resume Toymate", () => engine.resume(), "tm-primary");
-  const errorLine = h("div", { class: "tm-error", hidden: true });
-  const modeRow = h("div", { class: "tm-row" });
-  const reactions = h(
+  const connTitle = h("b", {});
+  const connSub = h("small", {});
+  const scanBtn = button(icon("scan"), () => void engine.toggleScan(), "ghost icon-only", "Scan for devices");
+  const connectBtn = button("Connect", () => void (engine.view().connection === "connected" ? engine.disconnect() : engine.connect()), "primary sm");
+  const stopBtn = button([icon("stop"), "STOP", h("small", {}, "Shift+Esc")], () => void engine.panic(), "tm-stop", "Stop every device and pause Toymate");
+  const paused = h(
     "div",
-    { class: "tm-row" },
-    h("span", { class: "tm-dim" }, "React:"),
-    button("More", () => engine.react("more"), "tm-small"),
-    button("Less", () => engine.react("less"), "tm-small"),
-    button("Hold", () => engine.react("hold"), "tm-small"),
-    button("Stop", () => engine.react("stop"), "tm-small"),
+    { class: "tm-paused", role: "status" },
+    h("div", {}, h("b", {}, "Paused"), h("small", {}, "Every device is stopped. Nothing runs until you resume.")),
+    button([icon("play"), "Resume"], () => engine.resume(), "primary"),
   );
-  const head = h(
-    "div",
-    { class: "tm-head" },
-    h("div", { class: "tm-row tm-spread" }, h("span", { class: "tm-status" }, dot, statusText), h("span", { class: "tm-row" }, scanBtn, connectBtn)),
-    stopBtn,
-    resumeBtn,
-    errorLine,
-    modeRow,
-    reactions,
-  );
-
-  const liveBody = h("div", {});
-  const meters = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
-  const manual = h("div", {});
-  const planBox = h("div", {});
-  liveBody.append(meters, manual, planBox);
-  const devicesBody = h("div", {});
-  const rulesBody = h("div", {});
-  const storyBody = h("div", {});
-  const safetyBody = h("div", {});
-  const connectionBody = h("div", {});
+  const alert = h("div", { class: "tm-alert", role: "alert" });
+  const tabButtons = TABS.map(([id, label]) => h("button", { type: "button", role: "tab", onclick: () => setTab(id) }, label));
+  const bodies: Record<Tab, HTMLElement> = {
+    play: h("div", { class: "tm-tab", role: "tabpanel" }),
+    devices: h("div", { class: "tm-tab", role: "tabpanel" }),
+    rules: h("div", { class: "tm-tab", role: "tabpanel" }),
+    settings: h("div", { class: "tm-tab", role: "tabpanel" }),
+  };
 
   root.replaceChildren(
     h(
       "div",
-      { class: "tm-panel" },
-      head,
-      sec("live", "Live", liveBody),
-      sec("devices", "Devices & zones", devicesBody),
-      sec("rules", "Reactive rules", rulesBody),
-      sec("story", "Story mode", storyBody),
-      sec("safety", "Safety & limits", safetyBody),
-      sec("connection", "Connection", connectionBody),
+      { class: "tm" },
+      h(
+        "div",
+        { class: "tm-top" },
+        h("div", { class: "tm-conn" }, dot, h("div", { class: "tm-conn-text" }, connTitle, connSub), scanBtn, connectBtn),
+        stopBtn,
+        paused,
+        alert,
+      ),
+      h("div", { class: "tm-tabs", role: "tablist" }, ...tabButtons),
+      ...Object.values(bodies),
     ),
   );
 
+  function setTab(next: Tab) {
+    tab = next;
+    TABS.forEach(([id], i) => {
+      tabButtons[i]!.className = id === tab ? "on" : "";
+      tabButtons[i]!.setAttribute("aria-selected", String(id === tab));
+      bodies[id].hidden = id !== tab;
+    });
+  }
+
   function renderHeader() {
     const v = engine.view();
+    const outputs = v.devices.reduce((n, d) => n + d.outputs.length, 0);
     dot.dataset.state = v.connection;
-    dot.dataset.active = String(v.active);
-    statusText.textContent =
+    dot.dataset.active = String(v.active && !v.paused);
+    connTitle.textContent =
       v.connection === "connected"
-        ? `${v.devices.length} device${v.devices.length === 1 ? "" : "s"}${v.paused ? " · paused" : v.active ? " · running" : ""}`
+        ? v.devices.length
+          ? `${v.devices.length} ${v.devices.length === 1 ? "toy" : "toys"} connected`
+          : "Connected, no toys yet"
         : v.connection === "connecting"
           ? "Connecting…"
           : "Not connected";
+    connSub.textContent =
+      v.connection === "connected"
+        ? v.scanning
+          ? "Scanning for toys…"
+          : v.devices.length
+            ? `${outputs} output${outputs === 1 ? "" : "s"}${v.active && !v.paused ? " · running" : ""}`
+            : "Turn a toy on, then scan"
+        : deps.settings().intifaceUrl;
     connectBtn.textContent = v.connection === "connected" ? "Disconnect" : "Connect";
+    connectBtn.className = `tm-btn sm ${v.connection === "connected" ? "" : "primary"}`;
     connectBtn.disabled = v.connection === "connecting";
-    scanBtn.textContent = v.scanning ? "Stop scan" : "Scan";
-    scanBtn.disabled = v.connection !== "connected";
+    scanBtn.hidden = v.connection !== "connected";
+    scanBtn.setAttribute("aria-pressed", String(v.scanning));
     stopBtn.hidden = v.paused;
-    resumeBtn.hidden = !v.paused;
-    errorLine.hidden = !v.error;
-    errorLine.textContent = v.error ?? "";
+    paused.hidden = !v.paused;
+    alert.hidden = !v.error;
+    alert.textContent = v.error ?? "";
+    connectHint.hidden = v.connection === "connected";
   }
+
+  // ── play tab ───────────────────────────────────────────────────────────
+  const connectHint = h(
+    "div",
+    { class: "tm-empty" },
+    icon("plug"),
+    h("div", {}, h("b", {}, "Connect to Intiface"), h("p", { class: "tm-hint" }, "Open Intiface Central on this device, press Start Server, then connect.")),
+    button("Connect", () => void engine.connect(), "primary"),
+  );
+  const modeBox = h("div", {});
+  const zoneList = h("div", { class: "tm-zones" });
+  const reactions = h(
+    "div",
+    { class: "tm-reactions" },
+    button([icon("minus"), "Less"], () => engine.react("less"), "sm", "Less intense"),
+    button([icon("hold"), "Hold"], () => engine.react("hold"), "sm", "Keep it like this"),
+    button([icon("plus"), "More"], () => engine.react("more"), "sm", "More intense"),
+    button([icon("stop"), "Stop"], () => engine.react("stop"), "sm", "Stop the scene (not a pause)"),
+  );
+  const handBox = h("div", {});
+  const cueBox = h("div", {});
+  bodies.play.append(
+    connectHint,
+    modeBox,
+    group("Now", zoneList, reactions, h("p", { class: "tm-hint" }, "Reactions change things right away; in Story mode the next plan hears about them too.")),
+    cueBox,
+    handBox,
+  );
 
   function renderMode() {
     const s = deps.settings();
     const { chatId, characterId } = deps.activeChat();
-    const setChat = (mode: Mode) =>
+    if (!chatId) {
+      modeBox.replaceChildren(group("This chat", h("p", { class: "tm-hint" }, "Open a chat to choose how it drives your toys.")));
+      return;
+    }
+    const own = s.chatModes[chatId];
+    const effective = modeFor(s, chatId, characterId);
+    const setChat = (mode: Mode) => deps.update((x) => withChatMode(x, chatId, characterId, mode));
+    const setDefault = (on: boolean) =>
       deps.update((x) => {
-        const chatModes = { ...x.chatModes };
-        if (!chatId) return x;
-        if (mode === "off") delete chatModes[chatId];
-        else chatModes[chatId] = mode;
-        return { ...x, chatModes };
-      });
-    const setCharacter = (mode: Mode) =>
-      deps.update((x) => {
-        const characterModes = { ...x.characterModes };
         if (!characterId) return x;
-        if (mode === "off") delete characterModes[characterId];
-        else characterModes[characterId] = mode;
+        const characterModes = { ...x.characterModes };
+        if (on && effective !== "off") characterModes[characterId] = effective;
+        else delete characterModes[characterId];
         return { ...x, characterModes };
       });
-    const effective = (chatId && s.chatModes[chatId]) || (characterId && s.characterModes[characterId]) || "off";
-    modeRow.replaceChildren(
-      ...(chatId
-        ? [
-            h("span", { class: "tm-dim" }, "Mode:"),
-            h("span", { class: "tm-mode", "data-mode": effective }, MODE_LABELS[effective]),
-            select((s.chatModes[chatId] ?? "off") as Mode, MODES.map((m) => [m, `This chat: ${MODE_LABELS[m]}`] as const), setChat, "Mode for this chat"),
-            ...(characterId
-              ? [select((s.characterModes[characterId] ?? "off") as Mode, MODES.map((m) => [m, `Character default: ${MODE_LABELS[m]}`] as const), setCharacter, "Default mode for this character")]
-              : []),
-          ]
-        : [h("span", { class: "tm-hint" }, "Open a chat to choose its mode.")]),
+    const conn = deps.connections()?.find((c) => c.id === s.story.connectionId);
+    modeBox.replaceChildren(
+      group(
+        "This chat",
+        segmented(effective, [["off", "Off"], ["reactive", "Reactive"], ["story", "Story"]], setChat, "Mode for this chat", "big"),
+        h("p", { class: "tm-hint" }, MODE_HINT[effective], own === undefined && effective !== "off" ? " (this character's default)" : ""),
+        effective === "story"
+          ? h(
+              "div",
+              { class: "tm-row" },
+              h("span", { class: "tm-hint tm-grow" }, `Planner: ${conn ? `${conn.name} · ${conn.model}` : "your active connection"}`),
+              button("Change", () => setTab("settings"), "ghost sm"),
+            )
+          : effective === "reactive"
+            ? h(
+                "div",
+                { class: "tm-row" },
+                h("span", { class: "tm-hint tm-grow" }, `${s.rules.filter((r) => r.enabled).length} active rule${s.rules.filter((r) => r.enabled).length === 1 ? "" : "s"}`),
+                button("Edit rules", () => setTab("rules"), "ghost sm"),
+              )
+            : null,
+        characterId && effective !== "off"
+          ? field("Use for every chat with this character", toggle(s.characterModes[characterId] === effective, setDefault, "Use this mode for every chat with this character"))
+          : null,
+      ),
     );
   }
 
-  // ── live ──
-  let meterZones = "";
-  const meterRefs = new Map<string, { fill: HTMLElement; mark: HTMLElement; text: HTMLElement; lock: HTMLInputElement }>();
-  function renderMeters() {
+  let zoneSig = "";
+  const zoneRefs = new Map<string, { root: HTMLElement; fill: HTMLElement; mark: HTMLElement; level: HTMLElement; sub: HTMLElement; lock: HTMLButtonElement }>();
+  function renderZones() {
     const views = engine.view().scenes;
     const sig = views.map((v) => v.zone).join("|");
-    if (sig !== meterZones) {
-      meterZones = sig;
-      meterRefs.clear();
-      meters.replaceChildren(
+    if (sig !== zoneSig) {
+      zoneSig = sig;
+      zoneRefs.clear();
+      zoneList.replaceChildren(
         ...views.map((v) => {
           const fill = h("i", {});
           const mark = h("b", {});
-          const text = h("span", { class: "tm-dim" });
-          const lock = h("input", { type: "checkbox", title: "Lock: ignore rules and planner for this zone", onchange: (e) => engine.setLocked(v.zone, (e.target as HTMLInputElement).checked) });
-          meterRefs.set(v.zone, { fill, mark, text, lock });
-          return h("div", { class: "tm-zone" }, h("span", {}, v.zone), h("div", { class: "tm-meter" }, fill, mark), text, h("label", { class: "tm-toggle", title: "Lock zone" }, lock, h("span", { class: "tm-dim" }, "lock")));
+          const level = h("span", { class: "tm-zone-level" });
+          const sub = h("small", {});
+          const lock = button(icon("unlock"), () => engine.setLocked(v.zone, !engine.isLocked(v.zone)), "ghost icon-only tm-lock", "Lock: rules and planner leave this zone alone");
+          const el = h("div", { class: "tm-zone" }, h("div", { class: "tm-zone-name" }, v.zone, sub), h("div", { class: "tm-row" }, level, lock), h("div", { class: "tm-bar" }, fill, mark));
+          zoneRefs.set(v.zone, { root: el, fill, mark, level, sub, lock });
+          return el;
         }),
       );
     }
     for (const v of views) {
-      const r = meterRefs.get(v.zone);
+      const r = zoneRefs.get(v.zone);
       if (!r) continue;
+      const idle = v.level === 0 && v.target === 0 && !v.accent;
+      r.root.dataset.idle = String(idle);
       r.fill.style.width = `${v.level}%`;
-      r.mark.style.left = `${v.target}%`;
-      r.text.textContent = v.target > 0 || v.level > 0 ? `${v.level} · ${v.accent ?? `${v.feel}, ${v.tempo}`}` : "idle";
-      r.lock.checked = v.locked;
+      r.mark.style.left = `calc(${v.target}% - 1px)`;
+      r.mark.hidden = idle;
+      r.level.textContent = String(v.level);
+      r.sub.textContent = idle ? "idle" : v.accent ? v.accent : `${v.feel} · ${v.tempo}`;
+      r.lock.setAttribute("aria-pressed", String(v.locked));
+      r.lock.replaceChildren(icon(v.locked ? "lock" : "unlock"));
     }
   }
 
   const draft: { zone: string; level: number; feel: Feel; tempo: Tempo } = { zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" };
-  function renderManual() {
+  function renderHand() {
     const s = deps.settings();
     if (draft.zone !== ALL_ZONES && !s.zones.includes(draft.zone)) draft.zone = ALL_ZONES;
     const send = (intent: Intent) => engine.apply(intent, "manual");
-    manual.replaceChildren(
-      h(
-        "div",
-        { class: "tm-card" },
-        h("div", { class: "tm-row" }, select(draft.zone, [ALL_ZONES, ...s.zones], (z) => (draft.zone = z), "Zone"), select(draft.feel, FEELS, (f) => (draft.feel = f), "Feel"), select(draft.tempo, TEMPOS, (t) => (draft.tempo = t), "Tempo")),
-        slider("Level", draft.level, 0, 100, 1, (v) => (draft.level = v)),
+    handBox.replaceChildren(
+      group(
+        "Play by hand",
+        s.zones.length > 1 ? field("Zone", select(draft.zone, [[ALL_ZONES, "All zones"] as const, ...s.zones.map((z) => [z, z] as const)], (z) => ((draft.zone = z), renderHand()), "Zone")) : null,
+        chips(draft.feel, FEELS, (f) => ((draft.feel = f), renderHand()), "Feel"),
+        segmented(draft.tempo, TEMPOS.map((t) => [t, t] as const), (t) => ((draft.tempo = t), renderHand()), "Tempo"),
+        field("Level", range(draft.level, 0, 100, 1, (v) => (draft.level = v), "Level")),
         h(
           "div",
           { class: "tm-row" },
-          button("Play", () => send({ kind: "scene", zone: draft.zone, level: draft.level, feel: draft.feel, tempo: draft.tempo }), "tm-primary"),
-          ...ACCENTS.map((a: Accent) => button(a, () => send({ kind: "accent", zone: draft.zone, accent: a }), "tm-small")),
-          button("Stop zone", () => send({ kind: "stop", zone: draft.zone }), "tm-small"),
+          button([icon("play"), "Play"], () => send({ kind: "scene", zone: draft.zone, level: draft.level, feel: draft.feel, tempo: draft.tempo }), "primary tm-grow"),
+          button([icon("stop"), "Stop"], () => send({ kind: "stop", zone: draft.zone }), "", "Stop this zone (not a pause)"),
         ),
-        h("div", { class: "tm-hint" }, `Levels are capped at ${s.limits.maxLevel} and mapped onto each output's calibration. Scenes fade after ${Math.round(s.limits.holdTimeoutSec)} s without activity.`),
+        h(
+          "div",
+          { class: "tm-row" },
+          h("span", { class: "tm-hint tm-grow" }, "Add a moment:"),
+          ...ACCENTS.map((a) => button(a, () => send({ kind: "accent", zone: draft.zone, accent: a }), "sm", `Brief ${a} on top of what is playing`)),
+        ),
+        h("p", { class: "tm-hint" }, `Capped at level ${s.limits.maxLevel} and each toy's ceiling. Fades after ${Math.round(s.limits.holdTimeoutSec)} s without activity.`),
       ),
     );
   }
 
-  // Built when the plan changes; the timer only rewrites status text, so resume buttons never move under a click.
-  let cueStatus: { el: HTMLElement; atMs: number | null }[] = [];
-  function renderPlan() {
+  // Built when the plan changes; the timer only rewrites status, so resume buttons stay put.
+  let cueRefs: { li: HTMLElement; state: HTMLElement; atMs: number | null }[] = [];
+  function renderCues() {
     const p = triggers.plan;
-    cueStatus = [];
+    cueRefs = [];
     if (p.state === "idle" && !p.detail) {
-      planBox.replaceChildren();
+      cueBox.replaceChildren();
       return;
     }
     const items = p.cues.map((c, i) => {
-      const el = h("span", { class: "tm-dim" });
-      cueStatus.push({ el, atMs: c.atMs });
-      return h(
-        "li",
-        {},
-        button("▶", () => triggers.resumeFrom(i), "tm-small tm-resume", "Resume from this cue"),
-        " ",
-        h("b", {}, c.label),
-        " ",
-        el,
-        h("span", { class: "tm-dim" }, ` · “${c.sentence}”`),
-      );
+      const state = h("span", { class: "tm-cue-state" });
+      const li = h("li", { class: "tm-cue" }, button(icon("play"), () => triggers.resumeFrom(i), "ghost icon-only", "Play from this cue"), h("b", {}, c.label), state, h("q", {}, c.sentence));
+      cueRefs.push({ li, state, atMs: c.atMs });
+      return li;
     });
-    planBox.replaceChildren(
-      h(
-        "div",
-        { class: "tm-card" },
-        h("div", { class: p.state === "failed" ? "tm-error" : "tm-dim" }, p.detail),
+    cueBox.replaceChildren(
+      group(
+        "Story cues",
+        h("p", { class: p.state === "failed" ? "tm-alert" : "tm-hint" }, p.detail),
         items.length ? h("ol", { class: "tm-cues" }, ...items) : null,
-        items.length ? h("div", { class: "tm-hint" }, "▶ plays the reply's cues again from that point, at your reading speed. It also lifts a pause.") : null,
+        items.length ? h("p", { class: "tm-hint" }, "Press ▶ on a cue to play the reply again from there, at your reading pace. It also ends a pause.") : null,
       ),
     );
-    updateCueStatus();
+    updateCues();
   }
 
-  function updateCueStatus() {
+  function updateCues() {
     const now = Date.now();
-    const scheduled = engine.view().pendingCues > 0;
-    for (const { el, atMs } of cueStatus)
-      el.textContent = atMs === null ? "skipped" : atMs <= now ? "played" : scheduled ? `in ${Math.ceil((atMs - now) / 1000)} s` : "stopped";
+    const v = engine.view();
+    const scheduled = v.pendingCues > 0;
+    let current = -1;
+    cueRefs.forEach((c, i) => c.atMs !== null && c.atMs <= now && (current = i));
+    if (!v.active || v.paused) current = -1;
+    cueRefs.forEach((c, i) => {
+      const state =
+        c.atMs === null ? "skipped" : i === current ? "current" : c.atMs <= now ? "played" : scheduled ? "upcoming" : "stopped";
+      c.li.dataset.state = state;
+      c.state.textContent =
+        state === "upcoming" ? `in ${Math.ceil((c.atMs! - now) / 1000)} s` : state === "current" ? "now" : state;
+    });
   }
 
-  // ── devices ──
+  // ── devices tab ────────────────────────────────────────────────────────
+  const openCalibration = new Set<string>();
   let deviceSig = "";
-  const valueRefs = new Map<string, HTMLElement>();
+  const valueRefs = new Map<string, { fill: HTMLElement; output: OutputInfo }>();
   function renderDevices(force = false) {
     const v = engine.view();
     const s = deps.settings();
-    const sig = JSON.stringify([v.devices.map((d) => [d.name, d.battery, d.outputs.map((o) => o.key)]), s.zones, s.outputs, v.connection]);
+    const sig = JSON.stringify([v.devices.map((d) => [d.name, d.battery, d.outputs.map((o) => o.key)]), s.zones, s.outputs, v.connection, [...openCalibration]]);
     if (sig === deviceSig && !force) {
-      for (const [key, el] of valueRefs) el.textContent = `${v.values[key] ?? 0}`;
+      for (const { fill, output } of valueRefs.values()) {
+        const value = v.values[output.key] ?? 0;
+        const [min, max] = output.range;
+        fill.style.width = `${Math.round((Math.abs(value) / Math.max(Math.abs(min), Math.abs(max), 1)) * 100)}%`;
+      }
       return;
     }
     deviceSig = sig;
     valueRefs.clear();
     const setPrefs = (key: string, patch: Partial<typeof DEFAULT_OUTPUT_PREFS>) =>
       deps.update((x) => ({ ...x, outputs: { ...x.outputs, [key]: { ...prefsFor(x, key), ...patch } } }));
-    const deviceCard = (d: DeviceInfo) =>
-      h(
-        "div",
-        { class: "tm-card" },
-        h("div", { class: "tm-row tm-spread" }, h("b", {}, d.name), h("span", { class: "tm-dim" }, d.battery === null ? "" : `battery ${d.battery}%`)),
-        ...d.outputs.map((o) => {
-          const p = prefsFor(s, o.key);
-          const val = h("span", { class: "tm-dim" }, `${v.values[o.key] ?? 0}`);
-          valueRefs.set(o.key, val);
-          if (UNDRIVEN.has(o.kind)) return h("div", { class: "tm-hint" }, `Feature ${o.featureIndex}: ${describeKind(o.kind)} (not driven by Toymate)`);
-          return h(
-            "div",
-            { class: "tm-rule" },
-            h(
-              "div",
-              { class: "tm-row tm-spread" },
-              h("span", {}, `Feature ${o.featureIndex} · ${describeKind(o.kind)} `, h("span", { class: "tm-dim" }, "now "), val, h("span", { class: "tm-dim" }, ` / ${o.range[1]}`)),
-              select(p.zone, s.zones, (zone) => setPrefs(o.key, { zone }), "Zone"),
-            ),
-            slider("Floor (barely felt)", p.floor, 0, 100, 1, (floor) => setPrefs(o.key, { floor, ceiling: Math.max(floor, p.ceiling) }), "%"),
-            slider("Ceiling (strongest)", p.ceiling, 0, 100, 1, (ceiling) => setPrefs(o.key, { ceiling, floor: Math.min(p.floor, ceiling) }), "%"),
-            h(
-              "div",
-              { class: "tm-row" },
-              button("Test floor", () => engine.test(o.key, 1), "tm-small", "Runs for 2 seconds at the floor"),
-              button("Test middle", () => engine.test(o.key, 50), "tm-small"),
-              button("Test ceiling", () => engine.test(o.key, 100), "tm-small", "Runs for 2 seconds at the ceiling (or the max level)"),
-            ),
-          );
-        }),
-      );
-    devicesBody.replaceChildren(
-      v.connection !== "connected"
-        ? h("div", { class: "tm-hint" }, "Connect to Intiface to see devices.")
-        : v.devices.length === 0
-          ? h("div", { class: "tm-hint" }, "No devices yet. Connect them in Intiface, or press Scan.")
-          : h("div", { style: "display:flex;flex-direction:column;gap:8px" }, ...v.devices.map(deviceCard)),
-      textField("Zones", s.zones.join(", "), (text) => deps.update((x) => ({ ...x, zones: text.split(",") }))),
-      h("div", { class: "tm-hint" }, "Zones group outputs (for example: clit, internal, stroker). Rules and the planner address zones, never device names. Temperature outputs only follow their zone by name, never “all”."),
-    );
-  }
 
-  // ── rules ──
-  function renderRules() {
-    const s = deps.settings();
-    const setRules = (rules: Rule[]) => deps.update((x) => ({ ...x, rules }));
-    const patch = (i: number, r: Partial<Rule>) => setRules(s.rules.map((x, j) => (j === i ? { ...x, ...r } : x)));
-    const thenEditor = (rule: Rule, i: number) => {
-      const t = rule.then;
-      const action = t.kind;
-      const setThen = (then: Intent) => patch(i, { then });
-      const zone = select(t.zone, [ALL_ZONES, ...s.zones], (zone) => setThen({ ...t, zone }), "Zone");
-      const kindSel = select(action, ["scene", "accent", "stop"] as const, (k) =>
-        setThen(k === "scene" ? { kind: "scene", zone: t.zone, level: 40, feel: "wave", tempo: "medium" } : k === "accent" ? { kind: "accent", zone: t.zone, accent: "spike" } : { kind: "stop", zone: t.zone }),
-      );
-      if (t.kind === "scene")
-        return h(
-          "div",
-          { class: "tm-row" },
-          kindSel,
-          zone,
-          h("input", { class: "tm-input tm-num", type: "number", min: -100, max: 100, value: t.level ?? t.delta ?? 0, title: "Level 0-100", onchange: (e) => setThen({ ...t, level: Number((e.target as HTMLInputElement).value) }) }),
-          select(t.feel ?? "steady", FEELS, (feel) => setThen({ ...t, feel }), "Feel"),
-          select(t.tempo ?? "medium", TEMPOS, (tempo) => setThen({ ...t, tempo }), "Tempo"),
-        );
-      if (t.kind === "accent") return h("div", { class: "tm-row" }, kindSel, zone, select(t.accent, ACCENTS, (accent) => setThen({ ...t, accent }), "Accent"));
-      return h("div", { class: "tm-row" }, kindSel, zone);
-    };
-    rulesBody.replaceChildren(
-      h("div", { class: "tm-hint" }, "Rules run in chats set to Reactive. Match: comma-separated keywords, or /regex/i. Empty matches everything."),
-      ...s.rules.map((rule, i) =>
+    const outputRow = (d: DeviceInfo, o: OutputInfo) => {
+      const kind = KIND[o.kind];
+      const sameKind = d.outputs.filter((x) => x.kind === o.kind).length > 1;
+      const label = `${kind.label}${sameKind ? ` ${o.featureIndex + 1}` : ""}`;
+      if (UNDRIVEN.has(o.kind))
+        return h("div", { class: "tm-output" }, h("div", { class: "tm-output-head" }, h("span", { class: "tm-kind" }, icon(kind.icon), label), h("span", { class: "tm-hint" }, "not used by Toymate")));
+      const p = prefsFor(s, o.key);
+      const fill = h("i", {});
+      valueRefs.set(o.key, { fill, output: o });
+      const isOpen = openCalibration.has(o.key);
+      const toggleOpen = () => {
+        if (isOpen) openCalibration.delete(o.key);
+        else openCalibration.add(o.key);
+        renderDevices(true);
+      };
+      const disclose = button([icon("chevron"), "Calibrate"], toggleOpen, "ghost sm tm-disclose");
+      disclose.setAttribute("aria-expanded", String(isOpen));
+      return h(
+        "div",
+        { class: "tm-output" },
         h(
           "div",
-          { class: "tm-rule" },
-          h(
-            "div",
-            { class: "tm-row tm-spread" },
-            toggle("Enabled", rule.enabled, (enabled) => patch(i, { enabled })),
-            select(rule.when, RULE_TRIGGERS.map((w) => [w, TRIGGER_LABELS[w]] as const), (when) => patch(i, { when })),
-            button("Delete", () => setRules(s.rules.filter((_, j) => j !== i)), "tm-small tm-danger-text"),
-          ),
-          textField("Match", rule.match, (match) => patch(i, { match }), "kiss, touch  or  /moan(s|ed)?/i"),
-          thenEditor(rule, i),
+          { class: "tm-output-head" },
+          h("span", { class: "tm-kind" }, icon(kind.icon), label),
+          h("span", { class: "tm-mini" }, fill),
+          s.zones.length > 1 ? select(p.zone, s.zones, (zone) => setPrefs(o.key, { zone }), `Zone for ${label}`) : null,
+        ),
+        h("div", { class: "tm-row" }, s.outputs[o.key] ? h("span", { class: "tm-hint tm-grow" }, `Feels ${p.floor}–${p.ceiling}%`) : h("span", { class: "tm-grow" }, h("span", { class: "tm-badge" }, "Not calibrated")), disclose),
+        isOpen
+          ? h(
+              "div",
+              { class: "tm-calibrate" },
+              field("Floor", range(p.floor, 0, 100, 1, (floor) => setPrefs(o.key, { floor, ceiling: Math.max(floor, p.ceiling) }), "Floor", pct), "Lowest you can feel", true),
+              field("Ceiling", range(p.ceiling, 0, 100, 1, (ceiling) => setPrefs(o.key, { ceiling, floor: Math.min(p.floor, ceiling) }), "Ceiling", pct), "Strongest you want", true),
+              h(
+                "div",
+                { class: "tm-row" },
+                h("span", { class: "tm-hint tm-grow" }, "Try it for 2 s:"),
+                button("Floor", () => engine.test(o.key, 1), "sm"),
+                button("Middle", () => engine.test(o.key, 50), "sm"),
+                button("Ceiling", () => engine.test(o.key, 100), "sm"),
+              ),
+            )
+          : null,
+      );
+    };
+
+    const empty = (title: string, body: string, action: HTMLElement) =>
+      h("div", { class: "tm-empty" }, icon("plug"), h("div", {}, h("b", {}, title), h("p", { class: "tm-hint" }, body)), action);
+
+    bodies.devices.replaceChildren(
+      ...present(
+      v.connection !== "connected"
+        ? empty("Not connected", "Start the server in Intiface Central, then connect.", button("Connect", () => void engine.connect(), "primary"))
+        : v.devices.length === 0
+          ? empty("No toys yet", "Turn your toy on and pair it in Intiface Central, or scan from here.", button([icon("scan"), "Scan"], () => void engine.toggleScan(), "primary"))
+          : null,
+      ),
+      ...v.devices.map((d) =>
+        h(
+          "div",
+          { class: "tm-device" },
+          h("div", { class: "tm-device-head" }, d.name, d.battery === null ? null : h("small", {}, icon("battery"), `${d.battery}%`)),
+          ...d.outputs.map((o) => outputRow(d, o)),
         ),
       ),
+      zonesGroup(s),
+    );
+  }
+
+  function zonesGroup(s: Settings) {
+    const setZones = (zones: string[]) => deps.update((x) => ({ ...x, zones }));
+    const add = text("", (z) => z.trim() && setZones([...s.zones, z]), "New zone", "+ add zone");
+    return group(
+      "Zones",
       h(
         "div",
-        { class: "tm-row" },
-        button("Add rule", () =>
-          setRules([...s.rules, { id: crypto.randomUUID(), enabled: true, when: "character_message", match: "", characterId: null, then: { kind: "scene", zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" } }]),
+        { class: "tm-zone-chips" },
+        ...s.zones.map((z) =>
+          h("span", { class: "tm-zone-chip" }, z, s.zones.length > 1 ? button("×", () => setZones(s.zones.filter((x) => x !== z)), "", `Remove zone ${z}`) : null),
+        ),
+        add,
+      ),
+      h("p", { class: "tm-hint" }, "Group outputs by where you wear them, like clit, internal, or stroker. Rules and the planner use zones, never toy names."),
+    );
+  }
+
+  // ── rules tab ──────────────────────────────────────────────────────────
+  function renderRules() {
+    const s = deps.settings();
+    const { chatId, characterId } = deps.activeChat();
+    const setRules = (rules: Rule[]) => deps.update((x) => ({ ...x, rules }));
+    const patch = (i: number, r: Partial<Rule>) => setRules(s.rules.map((x, j) => (j === i ? { ...x, ...r } : x)));
+    const newRule = (over: Partial<Rule> = {}): Rule => ({
+      id: crypto.randomUUID(),
+      enabled: true,
+      when: "character_message",
+      match: "",
+      characterId: null,
+      then: { kind: "scene", zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" },
+      ...over,
+    });
+    const zoneOpts = [[ALL_ZONES, "all zones"] as const, ...s.zones.map((z) => [z, z] as const)];
+
+    const thenRow = (rule: Rule, i: number) => {
+      const t = rule.then;
+      const setThen = (then: Intent) => patch(i, { then });
+      const kind = select(
+        t.kind,
+        [["scene", "play"], ["accent", "accent"], ["stop", "stop"]] as const,
+        (k) =>
+          setThen(
+            k === "scene"
+              ? { kind: "scene", zone: t.zone, level: 40, feel: "wave", tempo: "medium" }
+              : k === "accent"
+                ? { kind: "accent", zone: t.zone, accent: "spike" }
+                : { kind: "stop", zone: t.zone },
+          ),
+        "Action",
+      );
+      const zone = select(t.zone, zoneOpts, (z) => setThen({ ...t, zone: z }), "Zone");
+      const what =
+        t.kind === "scene"
+          ? [select(t.feel ?? "steady", FEELS, (feel) => setThen({ ...t, feel }), "Feel"), select(t.tempo ?? "medium", TEMPOS, (tempo) => setThen({ ...t, tempo }), "Tempo")]
+          : t.kind === "accent"
+            ? [select(t.accent, ACCENTS, (accent) => setThen({ ...t, accent }), "Accent")]
+            : [];
+      return [
+        h("div", { class: "tm-then" }, h("span", { class: "tm-word" }, "then"), kind, ...what),
+        h(
+          "div",
+          { class: "tm-then tm-then-where" },
+          ...(t.kind === "scene" ? [h("span", { class: "tm-word" }, "at"), number(t.level ?? 0, 0, 100, (level) => setThen({ ...t, level }), "Level")] : [h("span", {}), h("span", {})]),
+          h("span", { class: "tm-word" }, "on"),
+          zone,
+        ),
+      ];
+    };
+
+    const mode = modeFor(s, chatId, characterId);
+    bodies.rules.replaceChildren(
+      ...present(chatId && mode !== "reactive"
+        ? h(
+            "div",
+            { class: "tm-empty" },
+            h("p", { class: "tm-hint" }, `Rules only run in chats set to Reactive. This chat is ${mode === "story" ? "in Story mode" : "Off"}.`),
+            button("Use Reactive here", () => deps.update((x) => withChatMode(x, chatId, characterId, "reactive")), "sm"),
+          )
+        : null),
+      group(
+        "Rules",
+        ...(s.rules.length
+          ? s.rules.map((rule, i) =>
+              h(
+                "div",
+                { class: "tm-rule", "data-off": String(!rule.enabled) },
+                h(
+                  "div",
+                  { class: "tm-row tm-nowrap" },
+                  toggle(rule.enabled, (enabled) => patch(i, { enabled }), "Rule on or off"),
+                  h("span", { class: "tm-word" }, "When"),
+                  select(rule.when, RULE_TRIGGERS.map((w) => [w, TRIGGER_LABELS[w]] as const), (when) => patch(i, { when }), "When"),
+                  button(icon("trash"), () => setRules(s.rules.filter((_, j) => j !== i)), "ghost icon-only danger-text", "Delete rule"),
+                ),
+                h("div", { class: "tm-row" }, h("span", { class: "tm-word" }, "with"), text(rule.match, (match) => patch(i, { match }), "Match", "any text · or: kiss, touch · or /moan(s|ed)?/i")),
+                ...thenRow(rule, i),
+              ),
+            )
+          : [h("p", { class: "tm-hint" }, "No rules yet. A rule like “when a reply mentions kiss, play a slow wave at 40” is a good start.")]),
+        h(
+          "div",
+          { class: "tm-row" },
+          button([icon("plus"), "Add rule"], () => setRules([...s.rules, newRule()]), "sm"),
+          s.rules.length ? null : button("Add the example", () => setRules([newRule({ match: "kiss, touch, caress", then: { kind: "scene", zone: ALL_ZONES, level: 40, feel: "wave", tempo: "slow" } })]), "ghost sm"),
         ),
       ),
-      toggle("Stream pulse: pulse while the reply streams (Reactive chats)", s.streamPulse, (streamPulse) => deps.update((x) => ({ ...x, streamPulse }))),
+      group("While replies stream", field("Stream pulse", toggle(s.streamPulse, (streamPulse) => deps.update((x) => ({ ...x, streamPulse })), "Stream pulse"), "Pulse along with the text as it is written")),
     );
   }
 
-  // ── story ──
-  function renderStory() {
-    const s = deps.settings();
-    const conns = deps.connections();
-    const options: (readonly [string, string])[] = [["", "Active connection"], ...(conns ?? []).map((c) => [c.id, `${c.name} (${c.model})`] as const)];
-    if (s.story.connectionId && !options.some(([id]) => id === s.story.connectionId)) options.push([s.story.connectionId, "Saved connection (not found)"]);
-    storyBody.replaceChildren(
-      h("div", { class: "tm-hint" }, "In Story chats, a separate planner call reads each finished reply and schedules cues as you read. Messages stay clean."),
-      h(
-        "label",
-        { class: "tm-field tm-field-wide" },
-        h("span", {}, "Planner connection"),
-        select(s.story.connectionId ?? "", options, (id) => deps.update((x) => ({ ...x, story: { ...x.story, connectionId: id || null } })), "Planner connection"),
-      ),
-      ...(conns === null ? [button("Load connections", () => deps.requestConnections(), "tm-small")] : []),
-      h("div", { class: "tm-hint" }, "Each reply's text is sent to this connection's provider. Pick the provider you already use for roleplay, or a local model. A small fast model is enough; it must support tool calling or JSON output."),
-      numberField("Reading speed (chars/s)", s.story.readingCps, 3, 100, (readingCps) => deps.update((x) => ({ ...x, story: { ...x.story, readingCps } }))),
-      toggle("Character awareness: tell the roleplay model about the devices", s.story.awareness, (awareness) => deps.update((x) => ({ ...x, story: { ...x.story, awareness } }))),
-    );
-  }
-
-  // ── safety ──
-  function renderSafety() {
+  // ── settings tab ───────────────────────────────────────────────────────
+  function renderSettings() {
     const s = deps.settings();
     const L = s.limits;
-    const setL = (patch: Partial<Settings["limits"]>) => deps.update((x) => ({ ...x, limits: { ...x.limits, ...patch } }));
-    safetyBody.replaceChildren(
-      slider("Max level", L.maxLevel, 0, 100, 1, (maxLevel) => setL({ maxLevel })),
-      slider("Ramp (levels/s)", L.rampPerSecond, 5, 200, 5, (rampPerSecond) => setL({ rampPerSecond })),
-      numberField("Fade after idle (s)", L.holdTimeoutSec, 10, 3600, (holdTimeoutSec) => setL({ holdTimeoutSec })),
-      toggle("Stop all when a generation is stopped", L.stopOnGenerationStop, (stopOnGenerationStop) => setL({ stopOnGenerationStop })),
-      h("b", {}, "Strokers"),
-      slider("Max stroke speed", L.strokeMaxSpeed, 0.1, 5, 0.1, (strokeMaxSpeed) => setL({ strokeMaxSpeed }), "/s"),
-      slider("Stroke range min", L.strokeMin, 0, 100, 1, (strokeMin) => setL({ strokeMin, strokeMax: Math.max(strokeMin, L.strokeMax) }), "%"),
-      slider("Stroke range max", L.strokeMax, 0, 100, 1, (strokeMax) => setL({ strokeMax, strokeMin: Math.min(L.strokeMin, strokeMax) }), "%"),
-      h("b", {}, "Other devices"),
-      numberField("Air pump max hold (s)", L.constrictMaxHoldSec, 2, 600, (constrictMaxHoldSec) => setL({ constrictMaxHoldSec })),
-      slider("Temperature cap", L.temperatureMax, 0, 100, 1, (temperatureMax) => setL({ temperatureMax }), "%"),
-      numberField("Rotation swap min (ms)", L.rotateSwapMinMs, 200, 60000, (rotateSwapMinMs) => setL({ rotateSwapMinMs })),
-      h("b", {}, "Safewords"),
-      textField("Stop everything", s.safewords.stop, (stop) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, stop } }))),
-      textField("Slow down", s.safewords.ease, (ease) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, ease } }))),
-      h("div", { class: "tm-hint" }, `Send a safeword as the whole message or out of character, e.g. “(${s.safewords.stop})” or “OOC: ${s.safewords.stop}”. Stop pauses Toymate and leaves Story mode. Shift+Esc stops everything from anywhere.`),
+    const setL = (p: Partial<Settings["limits"]>) => deps.update((x) => ({ ...x, limits: { ...x.limits, ...p } }));
+    const setStory = (p: Partial<Settings["story"]>) => deps.update((x) => ({ ...x, story: { ...x.story, ...p } }));
+    const conns = deps.connections();
+    const connOpts: (readonly [string, string])[] = [["", "Active connection"], ...(conns ?? []).map((c) => [c.id, `${c.name} · ${c.model}`] as const)];
+    if (s.story.connectionId && !connOpts.some(([id]) => id === s.story.connectionId)) connOpts.push([s.story.connectionId, "Saved connection (missing)"]);
+
+    bodies.settings.replaceChildren(
+      group(
+        "Safety",
+        field("Max level", range(L.maxLevel, 0, 100, 1, (maxLevel) => setL({ maxLevel }), "Max level"), "Nothing goes above this", true),
+        field("Ramp speed", range(L.rampPerSecond, 5, 200, 5, (rampPerSecond) => setL({ rampPerSecond }), "Ramp", (v) => `${v}/s`), "How fast intensity may rise", true),
+        field("Fade after", number(L.holdTimeoutSec, 10, 3600, (holdTimeoutSec) => setL({ holdTimeoutSec }), "Fade after seconds"), "Seconds without new activity"),
+        field("Stop when I stop a reply", toggle(L.stopOnGenerationStop, (stopOnGenerationStop) => setL({ stopOnGenerationStop }), "Stop when I stop a reply")),
+      ),
+      group(
+        "Safewords",
+        field("Stop everything", text(s.safewords.stop, (stop) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, stop } })), "Stop safeword")),
+        field("Slow down", text(s.safewords.ease, (ease) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, ease } })), "Slow-down safeword")),
+        h("p", { class: "tm-hint" }, `Send one as the whole message or out of character, like “(${s.safewords.stop})” or “OOC: ${s.safewords.stop}”. Stop pauses Toymate and turns Story mode off for the chat.`),
+      ),
+      group(
+        "Story planner",
+        field("Connection", select(s.story.connectionId ?? "", connOpts, (id) => setStory({ connectionId: id || null }), "Planner connection"), undefined, true),
+        conns === null ? button("Load connections", () => deps.requestConnections(), "ghost sm") : null,
+        h("p", { class: "tm-hint" }, "Each reply is sent to this connection. Use the provider you already roleplay with, or a local model. A small, fast, non-thinking model works best."),
+        field("Reading speed", number(s.story.readingCps, 3, 100, (readingCps) => setStory({ readingCps }), "Reading speed"), "Characters per second; cues follow it"),
+        field("Character awareness", toggle(s.story.awareness, (awareness) => setStory({ awareness }), "Character awareness"), "Tell the roleplay model about your toys"),
+      ),
+      group(
+        "Strokers",
+        field("Max speed", range(L.strokeMaxSpeed, 0.1, 5, 0.1, (strokeMaxSpeed) => setL({ strokeMaxSpeed }), "Max stroke speed", (v) => `${v}/s`), "Full strokes per second", true),
+        field("Lowest point", range(L.strokeMin, 0, 100, 1, (strokeMin) => setL({ strokeMin, strokeMax: Math.max(strokeMin, L.strokeMax) }), "Stroke range min", pct), undefined, true),
+        field("Highest point", range(L.strokeMax, 0, 100, 1, (strokeMax) => setL({ strokeMax, strokeMin: Math.min(L.strokeMin, strokeMax) }), "Stroke range max", pct), undefined, true),
+      ),
+      group(
+        "Other toys",
+        field("Air pump max hold", number(L.constrictMaxHoldSec, 2, 600, (constrictMaxHoldSec) => setL({ constrictMaxHoldSec }), "Air pump max hold"), "Seconds before it releases"),
+        field("Warmth cap", range(L.temperatureMax, 0, 100, 1, (temperatureMax) => setL({ temperatureMax }), "Warmth cap", pct), undefined, true),
+        field("Direction change gap", number(L.rotateSwapMinMs, 200, 60000, (rotateSwapMinMs) => setL({ rotateSwapMinMs }), "Rotation direction change gap"), "Milliseconds between reversals"),
+      ),
+      group(
+        "Connection",
+        field("Intiface address", text(s.intifaceUrl, (intifaceUrl) => deps.update((x) => ({ ...x, intifaceUrl: intifaceUrl.trim() })), "Intiface address", "ws://127.0.0.1:12345"), undefined, true),
+        field("Connect automatically", toggle(s.autoConnect, (autoConnect) => deps.update((x) => ({ ...x, autoConnect })), "Connect automatically"), "When Lumiverse opens"),
+      ),
     );
   }
 
-  function renderConnection() {
-    const s = deps.settings();
-    connectionBody.replaceChildren(
-      textField("Intiface URL", s.intifaceUrl, (intifaceUrl) => deps.update((x) => ({ ...x, intifaceUrl: intifaceUrl.trim() })), "ws://127.0.0.1:12345"),
-      toggle("Connect automatically when Lumiverse opens", s.autoConnect, (autoConnect) => deps.update((x) => ({ ...x, autoConnect }))),
-      h("div", { class: "tm-hint" }, "Toymate connects from this browser to Intiface Central on this device. Start the server in Intiface first."),
-    );
-  }
-
-  const renderSettings = () => {
+  // ── wiring ─────────────────────────────────────────────────────────────
+  const settingsChanged = () => {
     renderMode();
-    renderManual();
+    renderHand();
     renderDevices(true);
     renderRules();
-    renderStory();
-    renderSafety();
-    renderConnection();
+    renderSettings();
+    renderHeader();
   };
 
-  renderHeader();
-  renderMeters();
-  renderPlan();
-  renderSettings();
+  setTab(tab);
+  settingsChanged();
+  renderZones();
+  renderCues();
 
   const unsubEngine = engine.subscribe(() => {
     renderHeader();
-    renderMeters();
+    renderZones();
     renderDevices();
   });
-  const unsubPlan = triggers.onPlanChange(renderPlan);
-  const planTimer = setInterval(updateCueStatus, 1000);
+  const unsubPlan = triggers.onPlanChange(renderCues);
+  const cueTimer = setInterval(updateCues, 1000);
 
   return {
-    /** Settings changed (from the backend or locally). */
-    settingsChanged: renderSettings,
-    chatChanged: renderMode,
+    settingsChanged,
+    chatChanged() {
+      renderMode();
+      renderRules();
+    },
     dispose() {
       unsubEngine();
       unsubPlan();
-      clearInterval(planTimer);
+      clearInterval(cueTimer);
       root.replaceChildren();
     },
   };
 }
+

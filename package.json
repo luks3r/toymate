@@ -1,6 +1,6 @@
 {
   "name": "toymate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.4",
@@ -12,7 +12,8 @@
     "test": "bun test",
     "check": "bun run typecheck && bun test --pass-with-no-tests",
     "sync:repos": "sh scripts/sync-repos.sh",
-    "check:dist": "bun run build && git diff --exit-code --stat -- dist"
+    "check:dist": "bun run build && git diff --exit-code --stat -- dist",
+    "bump": "bun scripts/bump-version.ts"
   },
   "devDependencies": {
     "@types/bun": "1.4.5",

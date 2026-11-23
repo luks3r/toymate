@@ -87,25 +87,18 @@ The frontend loads settings on setup and sends changes back; both sides validate
 
 ## Sidebar UI
 
-One drawer tab, **Toymate** (sidebar icon, also in the command palette). The tab badge shows the live state: nothing when idle, a dot while any output runs, `!` when disconnected unexpectedly.
+One drawer tab, **Toymate** (sidebar icon, also in the command palette). The tab badge shows the live state: nothing when idle, a dot while any output runs, `II` while paused, `!` after an unexpected disconnect.
 
-Top of the panel, always visible:
+Always visible above the tabs: connection status with Connect/Disconnect and Scan, and the red **STOP** button. While paused, STOP is replaced by a Paused banner with **Resume**, so the stopped state is impossible to miss. Stop is also on Shift+Esc and in the chat input bar's Extras menu.
 
-- Connection status and connect/disconnect.
-- **Stop all** button. Also bound to a keyboard shortcut, and offered as an action in the chat input bar's Extras menu for mobile.
-- Mode for the current chat: Off / Reactive / Story, with a clear indicator while a mode is on.
-- Reaction buttons: more, less, hold, stop.
+Four tabs, ordered by how often they are needed:
 
-Collapsible sections below:
+1. **Play** – this chat's mode as a three-way switch (Off / Reactive / Story) with a one-line explanation and a shortcut to the planner or rules, an optional "use for every chat with this character" switch, per-zone meters with lock, reactions (Less, Hold, More, Stop), the Story cue timeline with ▶ resume, and play-by-hand controls (feel chips, tempo switch, level, accents).
+2. **Devices** – each toy with battery; each output with a live bar, zone, a "Not calibrated" badge until calibrated, and a Calibrate disclosure (floor, ceiling, 2-second tests). Zones are edited here as chips.
+3. **Rules** – rules written as sentences ("When a reply finishes with kiss, touch then play wave slow at 40 on all zones"), an example rule for empty lists, and stream pulse. Warns when the current chat is not in Reactive mode.
+4. **Settings** – safety limits, safewords, Story planner (connection, reading speed, awareness), stroker and other-toy limits, connection.
 
-1. **Live** – the current scene per zone (level meter, feel, tempo), upcoming cues for the current reply, manual controls (level slider, feel, tempo, accents), and a lock toggle.
-2. **Devices** – each device with battery and signal, each output with its type, zone selector, live value, calibration (floor, ceiling, guided calibrate), and a test button.
-3. **Rules** – ordered list with enable toggles and an editor (when / if / then).
-4. **Story** – per-character enable, planner connection and model (with a plain note that replies are sent to that provider), reading speed, character awareness on or off, what the planner may see (zone labels only or device names), and the last plan as a list of cues with their sentences.
-5. **Safety** – global max level, per-type limits (stroke speed and range, constrict hold time, temperature cap), hold timeout, safewords, stop-on-generation-stop.
-6. **Connection** – Intiface URL, auto-connect, scan.
-
-The UI is plain DOM styled with Lumiverse theme variables. The header (status, Stop all, Resume) and the live meters are built once and updated in place on every engine change; settings sections re-render only when settings change. A floating mini-remote (needs `ui_panels`) is a later option.
+The UI is plain DOM styled with Lumiverse theme variables. The header, zone meters, device bars, and cue status are built once and updated in place on every engine change; other parts rebuild only when settings, the device list, or the plan change, never on a timer. A floating mini-remote (needs `ui_panels`) is a later option.
 
 ## Permissions
 

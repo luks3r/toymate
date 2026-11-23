@@ -117,12 +117,12 @@ function parseRule(raw, zones) {
     then
   };
 }
-function parseModes(raw) {
+function parseModes(raw, keepOff) {
   const out = {};
   if (!isRecord(raw))
     return out;
   for (const [id, mode] of Object.entries(raw))
-    if (isMode(mode) && mode !== "off")
+    if (isMode(mode) && (keepOff || mode !== "off"))
       out[id] = mode;
   return out;
 }
@@ -166,12 +166,12 @@ function parseSettings(raw) {
       readingCps: num(story.readingCps, d.story.readingCps, 3, 100),
       awareness: bool(story.awareness, d.story.awareness)
     },
-    chatModes: parseModes(r.chatModes),
-    characterModes: parseModes(r.characterModes)
+    chatModes: parseModes(r.chatModes, true),
+    characterModes: parseModes(r.characterModes, false)
   };
 }
 function modeFor(settings, chatId, characterId) {
-  return chatId && settings.chatModes[chatId] || characterId && settings.characterModes[characterId] || "off";
+  return (chatId ? settings.chatModes[chatId] : undefined) ?? (characterId ? settings.characterModes[characterId] : undefined) ?? "off";
 }
 
 // src/backend/awareness.ts

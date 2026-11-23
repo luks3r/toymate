@@ -1,12 +1,15 @@
 {
-  "version": "0.1.0",
+  "version": "0.2.0",
   "name": "Toymate",
   "identifier": "toymate",
   "author": "luks3r",
   "github": "https://github.com/luks3r/toymate",
   "homepage": "https://github.com/luks3r/toymate",
   "description": "Drive Buttplug.io / Intiface devices from Lumiverse chats: rule-driven scenes and an opt-in Story mode that plays each reply as you read.",
-  "permissions": ["generation", "interceptor"],
+  "permissions": [
+    "generation",
+    "interceptor"
+  ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
   "minimum_lumiverse_version": "1.3.0"
