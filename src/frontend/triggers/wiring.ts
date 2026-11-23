@@ -1,5 +1,5 @@
 import { ALL_ZONES, clampLevel, describeIntent, isRecord } from "../../shared/intent";
-import { cueOffsetsMs, playbackMs, splitSentences, type PlannedCue } from "../../shared/plan";
+import { cueOffsetsMs, playbackMs, playbackPositionMs, splitSentences, type PlannedCue } from "../../shared/plan";
 import { matchRules } from "../../shared/rules";
 import { matchSafeword } from "../../shared/safewords";
 import { modeFor, withChatMode, type Mode, type Settings } from "../../shared/settings";
@@ -247,10 +247,10 @@ export class Triggers {
     };
     this.lastPlan = plan;
     const now = this.now();
-    const readingStart = pending.readingStart ?? now;
-    // A late plan starts at the cue the reader has already reached; earlier ones are skipped.
-    const reached = plan.offsets.findLastIndex((o) => readingStart + o <= now);
-    this.play(plan, Math.max(0, reached), readingStart);
+    const position = pending.readingStart === null ? 0 : playbackPositionMs(now - pending.readingStart, text.length, pace);
+    // Mid-reading, start at the cue the reader has reached; earlier ones are skipped.
+    const reached = plan.offsets.findLastIndex((o) => o <= position);
+    this.play(plan, Math.max(0, reached), now - position);
     const secs = Math.round(endMs / 1000);
     const detail = cues.length
       ? `${cues.length} cue${cues.length === 1 ? "" : "s"} over about ${secs} s.`

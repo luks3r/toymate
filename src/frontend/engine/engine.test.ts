@@ -102,6 +102,22 @@ describe("Governor", () => {
     expect(faults).toHaveLength(1);
   });
 
+  it("a lost ack stops blocking the output after the timeout and is reported", async () => {
+    const link = new FakeLink([]);
+    const stalls: string[] = [];
+    const s = settings();
+    const g = new Governor(link, s.limits, () => ({ zone: "main", floor: 0, ceiling: 100 }), () => {}, (o) => stalls.push(o.key));
+    const o = output("Vibrate", { timingGapMs: 0 });
+    link.hang = true;
+    g.apply(o, { kind: "value", value: 0 }, -1000);
+    g.apply(o, { kind: "value", value: 0.5 }, 0);
+    g.apply(o, { kind: "value", value: 0.6 }, 1000);
+    expect(link.sent.map((x) => x.value)).toEqual([50]);
+    g.apply(o, { kind: "value", value: 0.6 }, 2000);
+    expect(link.sent.map((x) => x.value)).toEqual([50, 60]);
+    expect(stalls).toEqual([o.key]);
+  });
+
   it("never drives undriven kinds", async () => {
     const { link, g } = setup();
     for (const kind of ["Spray", "Led", "Position"] as const) await run(g, output(kind), [[0, 1]]);
@@ -275,7 +291,7 @@ describe("Engine stop paths", () => {
     const { link, engine, at } = await setup();
     link.connected = false;
     engine.handleDisconnected();
-    expect(engine.view().error).toContain("disconnected");
+    expect(engine.view().error).toContain("Intiface closed the connection");
     await engine.connect();
     expect(link.stops).toBe(2);
     const before = link.sent.length;
@@ -293,6 +309,27 @@ describe("Engine stop paths", () => {
     expect(link.stops).toBe(2);
     expect(engine.view().scenes[0]!.target).toBe(0);
     expect(engine.view().error).toContain("ble gone");
+  });
+
+  it("ignores a second connect while one is in flight", async () => {
+    const link = new FakeLink([]);
+    let open!: () => void;
+    link.connectGate = new Promise((r) => (open = r));
+    const engine = new Engine(link, settings(), () => 0);
+    const first = engine.connect();
+    await engine.connect();
+    open();
+    await first;
+    expect(link.connects).toBe(1);
+    expect(engine.view().connection).toBe("connected");
+  });
+
+  it("says which toy dropped out of Intiface", async () => {
+    const { link, engine } = await setup();
+    link.devices = [];
+    engine.handleDevicesChanged();
+    expect(engine.view().error).toContain("Toy dropped out of Intiface");
+    expect(engine.view().connection).toBe("connected");
   });
 
   it("dispose stops devices then disconnects", async () => {

@@ -2331,19 +2331,22 @@ function clearScene(s) {
 
 // src/frontend/engine/governor.ts
 var RELEASE_MIN_MS = 5000;
+var ACK_TIMEOUT_MS = 2000;
 
 class Governor {
   sink;
   limits;
   prefs;
   onFault;
+  onStall;
   states = new Map;
   stopped = false;
-  constructor(sink, limits, prefs, onFault) {
+  constructor(sink, limits, prefs, onFault, onStall = () => {}) {
     this.sink = sink;
     this.limits = limits;
     this.prefs = prefs;
     this.onFault = onFault;
+    this.onStall = onStall;
   }
   configure(limits, prefs) {
     this.limits = limits;
@@ -2365,6 +2368,7 @@ class Governor {
         lastSent: 0,
         lastSentAt: -Infinity,
         inFlight: false,
+        sendId: 0,
         onSince: null,
         releaseUntil: 0,
         lastStrokeId: null,
@@ -2456,13 +2460,22 @@ class Governor {
   send(output, s, value, now, durationMs, force = false) {
     if (!force && value === s.lastSent)
       return false;
+    if (s.inFlight && now - s.lastSentAt >= ACK_TIMEOUT_MS) {
+      s.inFlight = false;
+      this.onStall(output);
+    }
     if (s.inFlight || now - s.lastSentAt < output.timingGapMs)
       return false;
+    const id = ++s.sendId;
     s.inFlight = true;
     s.lastSent = value;
     s.lastSentAt = now;
-    this.sink.send(output, value, durationMs).then(() => s.inFlight = false, (error) => {
-      s.inFlight = false;
+    this.sink.send(output, value, durationMs).then(() => {
+      if (s.sendId === id)
+        s.inFlight = false;
+    }, (error) => {
+      if (s.sendId === id)
+        s.inFlight = false;
       this.onFault(error);
     });
     return true;
@@ -2500,6 +2513,7 @@ class Engine {
   tests = new Map;
   reactions = [];
   listeners = new Set;
+  deviceNames = new Set;
   timer = null;
   lastNotify = 0;
   constructor(link, settings, now = () => Date.now()) {
@@ -2507,7 +2521,7 @@ class Engine {
     this.settings = settings;
     this.now = now;
     this.director = new Director(settings.zones, settings.limits.holdTimeoutSec * 1000);
-    this.governor = new Governor(link, settings.limits, (key) => prefsFor(this.settings, key), (e) => this.fault(e));
+    this.governor = new Governor(link, settings.limits, (key) => prefsFor(this.settings, key), (e) => this.fault(e), (output) => this.warn(`Intiface is not confirming commands for ${output.deviceName}. The toy may be out of Bluetooth range or low on battery.`));
   }
   start() {
     this.timer ??= setInterval(() => this.tick(this.now()), TICK_MS);
@@ -2527,6 +2541,8 @@ class Engine {
     this.notify(true);
   }
   async connect() {
+    if (this.connection !== "disconnected")
+      return;
     this.connection = "connecting";
     this.error = null;
     this.notify(true);
@@ -2534,6 +2550,7 @@ class Engine {
       await this.link.connect(this.settings.intifaceUrl);
       await this.link.stopAll();
       this.governor.reset();
+      this.deviceNames = new Set(this.link.list().map((d) => d.name));
       this.connection = "connected";
       await this.link.readBatteries();
     } catch (error) {
@@ -2553,12 +2570,17 @@ class Engine {
     this.director.stopAll(this.now());
     this.tests.clear();
     if (this.connection === "connected")
-      this.error = "Intiface disconnected. All output stopped.";
+      this.error = "Intiface closed the connection (its server stopped or restarted, or the connection dropped). All output stopped; connect again when ready.";
     this.connection = "disconnected";
     this.scanning = false;
     this.notify(true);
   }
   handleDevicesChanged() {
+    const names = new Set(this.link.list().map((d) => d.name));
+    const lost = [...this.deviceNames].filter((n) => !names.has(n));
+    if (this.connection === "connected" && lost.length)
+      this.warn(`${lost.join(", ")} dropped out of Intiface (Bluetooth). Its output stopped. Check its battery and range, then reconnect it in Intiface.`);
+    this.deviceNames = names;
     const keys = new Set(this.link.list().flatMap((d) => d.outputs.map((o) => o.key)));
     this.governor.retain(keys);
     for (const key of [...this.tests.keys()])
@@ -2659,6 +2681,10 @@ class Engine {
     this.governor.resume();
     this.notify(true);
   }
+  warn(message) {
+    this.error = message;
+    this.notify(true);
+  }
   fault(error) {
     this.error = `Device command failed, all output stopped: ${String(error).slice(0, 160)}`;
     this.stopEverything({ pause: false });
@@ -2751,12 +2777,27 @@ function playbackMs(textLength, pace) {
   const reading = textLength / pace.readingCps;
   return Math.round(Math.min(pace.maxReplySec, Math.max(pace.minReplySec, reading)) * 1000);
 }
+var MAX_CUE_GAP_MS = 3000;
 function cueOffsetsMs(sentences, cues, textLength, pace) {
   const total = playbackMs(textLength, pace);
-  return cues.map((cue) => {
+  const offsets = cues.map((cue) => {
     const s = sentences[cue.sentence - 1];
     return s ? Math.round(s.start / Math.max(1, textLength) * total) : 0;
   });
+  const gap = Math.min(MAX_CUE_GAP_MS, Math.floor(total / Math.max(1, offsets.length)));
+  for (let i = 1;i < offsets.length; i++)
+    offsets[i] = Math.max(offsets[i], offsets[i - 1] + gap);
+  for (let i = offsets.length - 1;i >= 0; i--) {
+    const limit = i === offsets.length - 1 ? total : offsets[i + 1] - gap;
+    offsets[i] = Math.max(0, Math.min(offsets[i], limit));
+  }
+  return offsets;
+}
+function playbackPositionMs(elapsedReadingMs, textLength, pace) {
+  const readingMs = textLength / pace.readingCps * 1000;
+  if (elapsedReadingMs <= 0 || elapsedReadingMs >= readingMs)
+    return 0;
+  return Math.round(elapsedReadingMs / readingMs * playbackMs(textLength, pace));
 }
 
 // src/shared/rules.ts
@@ -3074,9 +3115,9 @@ class Triggers {
     };
     this.lastPlan = plan;
     const now = this.now();
-    const readingStart = pending.readingStart ?? now;
-    const reached = plan.offsets.findLastIndex((o) => readingStart + o <= now);
-    this.play(plan, Math.max(0, reached), readingStart);
+    const position = pending.readingStart === null ? 0 : playbackPositionMs(now - pending.readingStart, text.length, pace);
+    const reached = plan.offsets.findLastIndex((o) => o <= position);
+    this.play(plan, Math.max(0, reached), now - position);
     const secs = Math.round(endMs / 1000);
     const detail = cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} over about ${secs} s.` : "The planner chose no cues for this reply.";
     this.setPlan({ ...this.plan, detail });

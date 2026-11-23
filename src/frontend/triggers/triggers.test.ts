@@ -118,7 +118,7 @@ describe("Story mode plans", () => {
       { sentence: 3, intent: { kind: "scene", zone: "all", level: 20 } },
     ]);
     // sentences start at 0, 1100, 1800 ms after reading began at 1000
-    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([null, 2500, 2800]);
+    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([null, 2500, 2833]);
     expect(t.engine.view().pendingCues).toBe(2);
   });
 
@@ -135,7 +135,7 @@ describe("Story mode plans", () => {
     t.setNow(10_000);
     t.triggers.resumeFrom(1);
     expect(t.engine.view().paused).toBe(false);
-    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([null, 10_000, 10_700]);
+    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([null, 10_000, 10_733]);
     expect(t.engine.view().pendingCues).toBe(2);
     t.triggers.resumeFrom(0);
     expect(t.engine.view().pendingCues).toBe(3);
@@ -179,6 +179,20 @@ describe("Story mode plans", () => {
     t.setNow(5000);
     t.triggers.onPlanResult(req!.type === "plan_last" ? req!.requestId : "", [{ sentence: 2, intent: { kind: "scene", zone: "all", level: 40 } }], "Aaaa aaaa. Bbbbb.");
     expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([6100]);
+  });
+
+  it("a short reply whose plan arrives after reading plays its whole stretched window from arrival", () => {
+    const t = setup({ story: { readingCps: 10, minReplySec: 30 } });
+    t.reply("g1", "Aaaa aaaa. Bbbbb.");
+    t.setNow(20_000);
+    t.triggers.onPlanResult("g1", [
+      { sentence: 1, intent: { kind: "scene", zone: "all", level: 30 } },
+      { sentence: 2, intent: { kind: "scene", zone: "all", level: 60 } },
+    ]);
+    // 17 chars read in 1.7 s, long done; playback is 30 s from now, nothing skipped
+    const at = t.triggers.plan.cues.map((c) => c.atMs!);
+    expect(at[0]).toBe(20_000);
+    expect(at[1]! - at[0]!).toBeGreaterThan(15_000);
   });
 
   it("drops plans for superseded or stopped replies", () => {

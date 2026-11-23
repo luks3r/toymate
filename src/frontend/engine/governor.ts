@@ -19,6 +19,8 @@ interface OutputState {
   lastSent: number;
   lastSentAt: number;
   inFlight: boolean;
+  /** Identifies the send in flight, so a late ack cannot clear a newer one. */
+  sendId: number;
   onSince: number | null;
   releaseUntil: number;
   lastStrokeId: number | null;
@@ -26,6 +28,11 @@ interface OutputState {
 }
 
 const RELEASE_MIN_MS = 5000;
+/**
+ * An unacknowledged command stops blocking the output after this long. Without
+ * it, one lost ack would freeze the output at its last value.
+ */
+export const ACK_TIMEOUT_MS = 2000;
 
 /**
  * Single choke point between renderers and hardware: calibration, limits,
@@ -40,6 +47,7 @@ export class Governor {
     private limits: Limits,
     private prefs: (key: string) => OutputPrefs,
     private onFault: (error: unknown) => void,
+    private onStall: (output: OutputInfo) => void = () => {},
   ) {}
 
   configure(limits: Limits, prefs: (key: string) => OutputPrefs) {
@@ -64,6 +72,7 @@ export class Governor {
         lastSent: 0,
         lastSentAt: -Infinity,
         inFlight: false,
+        sendId: 0,
         onSince: null,
         releaseUntil: 0,
         lastStrokeId: null,
@@ -157,14 +166,21 @@ export class Governor {
 
   private send(output: OutputInfo, s: OutputState, value: number, now: number, durationMs?: number, force = false): boolean {
     if (!force && value === s.lastSent) return false;
+    if (s.inFlight && now - s.lastSentAt >= ACK_TIMEOUT_MS) {
+      s.inFlight = false;
+      this.onStall(output);
+    }
     if (s.inFlight || now - s.lastSentAt < output.timingGapMs) return false;
+    const id = ++s.sendId;
     s.inFlight = true;
     s.lastSent = value;
     s.lastSentAt = now;
     this.sink.send(output, value, durationMs).then(
-      () => (s.inFlight = false),
+      () => {
+        if (s.sendId === id) s.inFlight = false;
+      },
       (error) => {
-        s.inFlight = false;
+        if (s.sendId === id) s.inFlight = false;
         this.onFault(error);
       },
     );

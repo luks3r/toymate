@@ -92,6 +92,10 @@ playback = clamp(characters ÷ reading speed, shortest, longest)
 start    = max(plan arrival, reading start + playback × characters before the sentence ÷ characters)
 ```
 
+Consecutive cues are kept at least `min(3 s, playback ÷ cues)` apart, so short neighbouring sentences ("Red?" "Really?") or several cues on one sentence do not fire together.
+
+Where playback starts depends on how far the user has read when the plan arrives. Still reading: at the same fraction of playback, skipping cues already passed. Finished reading (common with short replies and slow planners): from the first cue, so the stretched playback plays whole instead of collapsing into its last seconds. A plan the user asked for plays from the start.
+
 Defaults: 15 characters per second, at least 30 s, at most 300 s. Short replies stretch so a two-line message still plays for half a minute; very long ones compress. A cue lasts until the next cue starts. When the cues run out, the last scene either keeps going until the next reply or the hold timeout, or fades out over a few seconds (user setting). The planner is told the playback length so its `over` and `for` values fit.
 
 **Planning an earlier reply.** Only live replies are planned automatically. For a new chat's greeting, a chat opened later, or a fresh take on the current reply, the user presses **Plan last reply** (or **Re-plan**). The backend reads the chat's last visible character reply and the user message before it, after checking the chat belongs to the requesting user, and the plan plays from its arrival. This needs the `chats` and `chat_mutation` permissions; without them the button explains what to grant. Toymate only reads messages.

@@ -49,6 +49,7 @@ export class Engine {
   private tests = new Map<string, { level: number; until: number }>();
   private reactions: Reaction[] = [];
   private listeners = new Set<() => void>();
+  private deviceNames = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastNotify = 0;
 
@@ -58,7 +59,13 @@ export class Engine {
     private now: () => number = () => Date.now(),
   ) {
     this.director = new Director(settings.zones, settings.limits.holdTimeoutSec * 1000);
-    this.governor = new Governor(link, settings.limits, (key) => prefsFor(this.settings, key), (e) => this.fault(e));
+    this.governor = new Governor(
+      link,
+      settings.limits,
+      (key) => prefsFor(this.settings, key),
+      (e) => this.fault(e),
+      (output) => this.warn(`Intiface is not confirming commands for ${output.deviceName}. The toy may be out of Bluetooth range or low on battery.`),
+    );
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────
@@ -86,6 +93,8 @@ export class Engine {
   // ── connection ─────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
+    // A second connect would tear down the first mid-handshake and leave this state wrong.
+    if (this.connection !== "disconnected") return;
     this.connection = "connecting";
     this.error = null;
     this.notify(true);
@@ -94,6 +103,7 @@ export class Engine {
       // Devices may still run a value from an earlier session.
       await this.link.stopAll();
       this.governor.reset();
+      this.deviceNames = new Set(this.link.list().map((d) => d.name));
       this.connection = "connected";
       await this.link.readBatteries();
     } catch (error) {
@@ -115,13 +125,19 @@ export class Engine {
   handleDisconnected() {
     this.director.stopAll(this.now());
     this.tests.clear();
-    if (this.connection === "connected") this.error = "Intiface disconnected. All output stopped.";
+    if (this.connection === "connected")
+      this.error = "Intiface closed the connection (its server stopped or restarted, or the connection dropped). All output stopped; connect again when ready.";
     this.connection = "disconnected";
     this.scanning = false;
     this.notify(true);
   }
 
   handleDevicesChanged() {
+    const names = new Set(this.link.list().map((d) => d.name));
+    const lost = [...this.deviceNames].filter((n) => !names.has(n));
+    if (this.connection === "connected" && lost.length)
+      this.warn(`${lost.join(", ")} dropped out of Intiface (Bluetooth). Its output stopped. Check its battery and range, then reconnect it in Intiface.`);
+    this.deviceNames = names;
     const keys = new Set(this.link.list().flatMap((d) => d.outputs.map((o) => o.key)));
     this.governor.retain(keys);
     for (const key of [...this.tests.keys()]) if (!keys.has(key)) this.tests.delete(key);
@@ -233,6 +249,11 @@ export class Engine {
   resume() {
     this.paused = false;
     this.governor.resume();
+    this.notify(true);
+  }
+
+  private warn(message: string) {
+    this.error = message;
     this.notify(true);
   }
 

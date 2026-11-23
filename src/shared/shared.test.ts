@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { cueOffsetsMs, parsePlan, playbackMs, splitSentences } from "./plan";
+import { cueOffsetsMs, parsePlan, playbackMs, playbackPositionMs, splitSentences } from "./plan";
 import { matchRules } from "./rules";
 import { matchSafeword } from "./safewords";
 import { DEFAULT_SETTINGS, modeFor, parseSettings, withChatMode, type Rule } from "./settings";
@@ -112,6 +112,25 @@ describe("plan", () => {
     const pace = { readingCps: 10, minReplySec: 0, maxReplySec: 600 };
     expect(cueOffsetsMs(splitSentences(text), two, text.length, pace)).toEqual([0, 1100]);
     expect(playbackMs(text.length, pace)).toBe(1700);
+  });
+
+  it("keeps neighbouring cues apart and inside the playback window", () => {
+    const reply = 'She smiles. "Red?" "Really?" "Now." She leans in.';
+    const cues = [1, 2, 3, 4, 5].map((sentence) => ({ sentence, intent: { kind: "stop" as const, zone: "all" } }));
+    const pace = { readingCps: 15, minReplySec: 30, maxReplySec: 300 };
+    const offsets = cueOffsetsMs(splitSentences(reply), cues, reply.length, pace);
+    for (let i = 1; i < offsets.length; i++) expect(offsets[i]! - offsets[i - 1]!).toBeGreaterThanOrEqual(3000);
+    expect(offsets.at(-1)!).toBeLessThanOrEqual(30_000);
+    const same = cueOffsetsMs(splitSentences(reply), [1, 1, 1].map((sentence) => ({ sentence, intent: { kind: "stop" as const, zone: "all" } })), reply.length, pace);
+    expect(same).toEqual([0, 3000, 6000]);
+  });
+
+  it("starts playback where the reader is, or from the top once they finished reading", () => {
+    const pace = { readingCps: 10, minReplySec: 30, maxReplySec: 300 };
+    // 100 chars: 10 s of reading stretched to 30 s of playback
+    expect(playbackPositionMs(5000, 100, pace)).toBe(15_000);
+    expect(playbackPositionMs(12_000, 100, pace)).toBe(0);
+    expect(playbackPositionMs(0, 100, pace)).toBe(0);
   });
 
   it("stretches short replies and compresses long ones", () => {

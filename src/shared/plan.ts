@@ -97,11 +97,36 @@ export function playbackMs(textLength: number, pace: Pace): number {
   return Math.round(Math.min(pace.maxReplySec, Math.max(pace.minReplySec, reading)) * 1000);
 }
 
-/** Milliseconds from the start of playback to each cue's sentence, spread over the playback length. */
+/** Cues closer than this are spread apart, so short neighbouring sentences do not fire together. */
+const MAX_CUE_GAP_MS = 3000;
+
+/**
+ * Milliseconds from the start of playback to each cue's sentence, spread over
+ * the playback length, with consecutive cues at least a small gap apart.
+ */
 export function cueOffsetsMs(sentences: readonly Sentence[], cues: readonly PlannedCue[], textLength: number, pace: Pace): number[] {
   const total = playbackMs(textLength, pace);
-  return cues.map((cue) => {
+  const offsets = cues.map((cue) => {
     const s = sentences[cue.sentence - 1];
     return s ? Math.round((s.start / Math.max(1, textLength)) * total) : 0;
   });
+  // n cues fit in the playback window: n × gap ≤ total.
+  const gap = Math.min(MAX_CUE_GAP_MS, Math.floor(total / Math.max(1, offsets.length)));
+  for (let i = 1; i < offsets.length; i++) offsets[i] = Math.max(offsets[i]!, offsets[i - 1]! + gap);
+  for (let i = offsets.length - 1; i >= 0; i--) {
+    const limit = i === offsets.length - 1 ? total : offsets[i + 1]! - gap;
+    offsets[i] = Math.max(0, Math.min(offsets[i]!, limit));
+  }
+  return offsets;
+}
+
+/**
+ * Where in the playback window to start, given how long the user has been
+ * reading. Still reading: the matching point of playback. Done reading (short
+ * replies, slow planners): the start, so the whole stretched playback plays.
+ */
+export function playbackPositionMs(elapsedReadingMs: number, textLength: number, pace: Pace): number {
+  const readingMs = (textLength / pace.readingCps) * 1000;
+  if (elapsedReadingMs <= 0 || elapsedReadingMs >= readingMs) return 0;
+  return Math.round((elapsedReadingMs / readingMs) * playbackMs(textLength, pace));
 }
