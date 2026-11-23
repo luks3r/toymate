@@ -21,13 +21,16 @@ reactions                  type
 Every source (manual controls, rules, planner cues) speaks the same small vocabulary:
 
 - **level** `0–100` – how strong the scene is right now.
+- **to** and **over** – ramp from `level` (or the current level) to `to` over `over` seconds. Planner cues without `over` ramp until the next cue.
+- **spread** `0–50` – random wander of ± `spread` around the level, smooth, paced by tempo. Adds unpredictability without the source inventing numbers each time.
+- **for** – seconds a change lasts before the zone returns to what it replaced. A newer change cancels the return.
 - **feel** – the texture: `steady`, `pulse`, `wave`, `tease` (on/off with pauses), `build` (rises over the cue), `throb` (slow deep pulses), `random`.
 - **tempo** – `slow`, `medium`, `fast`. Drives pulse rate, stroke rate, direction changes.
 - **zone** – a user-assigned label for a group of outputs (for example "clit", "internal", "stroker"), or `all`.
 - **accent** – a short overlay on top of the scene: `spike` (brief surge), `pause` (brief stop), `flutter` (fast flicker).
 - **stop**.
 
-The vocabulary is small on purpose: models follow small grammars reliably, rules stay readable, and every word has a defined meaning on every device type.
+The vocabulary is small on purpose: models follow small grammars reliably, rules stay readable, and every word has a defined meaning on every device type. Ramps, spread, and durations are optional modifiers on a scene change, not new kinds of intent, so rules, manual play, and the planner all get them the same way.
 
 ## Scene, not one-shots
 
@@ -82,13 +85,16 @@ The roleplay model writes normal prose. When a live reply finishes, a separate *
 3. The model answers through one tool call, `plan_cues`, whose JSON schema is the intent vocabulary plus a sentence number per cue. A tool schema gives structured output on every provider that supports tools, without depending on `response_format`.
 4. The backend validates and clamps the plan and sends it to the requesting document only (`frontendSessionId`). The frontend schedules it.
 
-**Cue timing.** Each cue is anchored to a sentence and starts when the user is likely reading it:
+**Cue timing.** A reply plays over a length that follows its size but stays within the user's bounds, and each cue starts at its sentence's share of that length:
 
 ```
-start = max(plan arrival, generation start + characters before the sentence ÷ reading speed)
+playback = clamp(characters ÷ reading speed, shortest, longest)
+start    = max(plan arrival, reading start + playback × characters before the sentence ÷ characters)
 ```
 
-Reading speed is a user setting (default about 15 characters per second), and can later follow TTS playback when TTS is on. A cue lasts until the next cue starts; the last cue holds the scene until the next reply or the hold timeout.
+Defaults: 15 characters per second, at least 30 s, at most 300 s. Short replies stretch so a two-line message still plays for half a minute; very long ones compress. A cue lasts until the next cue starts. When the cues run out, the last scene either keeps going until the next reply or the hold timeout, or fades out over a few seconds (user setting). The planner is told the playback length so its `over` and `for` values fit.
+
+**Planning an earlier reply.** Only live replies are planned automatically. For a new chat's greeting, a chat opened later, or a fresh take on the current reply, the user presses **Plan last reply** (or **Re-plan**). The backend reads the chat's last visible character reply and the user message before it, after checking the chat belongs to the requesting user, and the plan plays from its arrival. This needs the `chats` and `chat_mutation` permissions; without them the button explains what to grant. Toymate only reads messages.
 
 **Late plans and resuming.** A plan that arrives after the reader passed some cues starts at the latest cue already reached; earlier cues are marked skipped. The latest plan stays available until the next plan, a chat switch, or a safeword: picking any cue replays the plan from that cue at reading pace. This is an explicit user action, so it also lifts a pause; it never happens on its own.
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { parseSettings } from "../shared/settings";
 import type { PlanRequest } from "../shared/wire";
 import { withAwareness } from "./awareness";
+import { lastReplyRequest } from "./last-reply";
 import { Planner, buildPlannerMessages, planFromResponse } from "./planner";
 
 const settings = parseSettings({ zones: ["clit"], limits: { maxLevel: 60 }, chatModes: { c: "story" }, story: { awareness: true } });
@@ -83,5 +84,41 @@ describe("awareness", () => {
     const result = withAwareness([...messages, { role: "assistant", content: "Sure" }], { chatId: "c", characterId: null }, settings, null);
     if (Array.isArray(result)) throw new Error("expected a note");
     expect(result.messages.map((m) => m.role)).toEqual(["system", "user", "system", "assistant"]);
+  });
+});
+
+describe("lastReplyRequest", () => {
+  const msg = { type: "plan_last" as const, requestId: "r", chatId: "c1", characterId: null, status: "Now: idle." };
+  const api = (owner: string | null, messages: { role: string; content: string; hidden: boolean }[], fail?: string) => ({
+    chats: {
+      get: async (chatId: string, userId?: string) => {
+        if (fail) throw new Error(fail);
+        return owner === userId ? ({ id: chatId } as never) : null;
+      },
+    },
+    chat: { getMessages: async () => messages },
+  });
+
+  it("returns the last visible character reply and the user message before it", async () => {
+    const req = await lastReplyRequest(
+      api("u1", [
+        { role: "user", content: "hi", hidden: false },
+        { role: "assistant", content: "Hello there.", hidden: false },
+        { role: "assistant", content: "secret", hidden: true },
+        { role: "user", content: "next", hidden: false },
+      ]),
+      msg,
+      "u1",
+    );
+    expect(req).toMatchObject({ content: "Hello there.", previousUserMessage: "hi", chatId: "c1" });
+  });
+
+  it("refuses chats owned by someone else", async () => {
+    await expect(lastReplyRequest(api("u2", [{ role: "assistant", content: "x", hidden: false }]), msg, "u1")).rejects.toThrow("Chat not found");
+  });
+
+  it("explains missing permissions and empty chats", async () => {
+    await expect(lastReplyRequest(api("u1", [], "PERMISSION_DENIED chats"), msg, "u1")).rejects.toThrow("chat_mutation");
+    await expect(lastReplyRequest(api("u1", [{ role: "user", content: "hi", hidden: false }]), msg, "u1")).rejects.toThrow("no character reply");
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { cueOffsetsMs, parsePlan, splitSentences } from "./plan";
+import { cueOffsetsMs, parsePlan, playbackMs, splitSentences } from "./plan";
 import { matchRules } from "./rules";
 import { matchSafeword } from "./safewords";
 import { DEFAULT_SETTINGS, modeFor, parseSettings, withChatMode, type Rule } from "./settings";
@@ -92,15 +92,33 @@ describe("plan", () => {
     ]);
   });
 
+  it("accepts ramps, spread, and temporary changes from the planner, clamped", () => {
+    const cues = parsePlan(
+      { cues: [{ sentence: 1, action: "set", level: 10, to: 95, over: 4, spread: 90, for: 9999 }, { sentence: 1, action: "set", over: 3 }] },
+      { sentenceCount: 1, zones: [], maxLevel: 70 },
+    );
+    expect(cues).toEqual([{ sentence: 1, intent: { kind: "scene", zone: "all", level: 10, to: 70, overSec: 4, spread: 50, forSec: 600 } }]);
+  });
+
   it("rejects malformed plans whole", () => {
     expect(parsePlan(null, { sentenceCount: 1, zones: [], maxLevel: 100 })).toBeNull();
     expect(parsePlan({ cues: "x" }, { sentenceCount: 1, zones: [], maxLevel: 100 })).toBeNull();
   });
 
+  const text = "Aaaa aaaa. Bbbbb.";
+  const two = [{ sentence: 1, intent: { kind: "stop" as const, zone: "all" } }, { sentence: 2, intent: { kind: "stop" as const, zone: "all" } }];
+
   it("offsets cues by reading position", () => {
-    const sentences = splitSentences("Aaaa aaaa. Bbbbb.");
-    const offsets = cueOffsetsMs(sentences, [{ sentence: 1, intent: { kind: "stop", zone: "all" } }, { sentence: 2, intent: { kind: "stop", zone: "all" } }], 10);
-    expect(offsets).toEqual([0, 1100]);
+    const pace = { readingCps: 10, minReplySec: 0, maxReplySec: 600 };
+    expect(cueOffsetsMs(splitSentences(text), two, text.length, pace)).toEqual([0, 1100]);
+    expect(playbackMs(text.length, pace)).toBe(1700);
+  });
+
+  it("stretches short replies and compresses long ones", () => {
+    const short = { readingCps: 10, minReplySec: 34, maxReplySec: 600 };
+    expect(playbackMs(text.length, short)).toBe(34_000);
+    expect(cueOffsetsMs(splitSentences(text), two, text.length, short)).toEqual([0, 22_000]);
+    expect(playbackMs(10_000, { readingCps: 10, minReplySec: 0, maxReplySec: 120 })).toBe(120_000);
   });
 });
 

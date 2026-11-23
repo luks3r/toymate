@@ -24,6 +24,18 @@ function hash01(n: number): number {
   return ((x ^ (x >>> 16)) >>> 0) / 2 ** 32;
 }
 
+export const TEMPO_PERIOD_MS = PERIOD_MS;
+
+/** Smooth deterministic wander in [-1, 1]; one new point per `periodMs`. */
+export function wander(now: number, periodMs: number, seed: number): number {
+  const t = now / periodMs;
+  const i = Math.floor(t);
+  const a = hash01(i * 7919 + seed) * 2 - 1;
+  const b = hash01((i + 1) * 7919 + seed) * 2 - 1;
+  const f = frac(t);
+  return a + (b - a) * (f * f * (3 - 2 * f));
+}
+
 /**
  * Texture multiplier in [0, 1] at time `now`. `phase` (0–1) offsets outputs
  * in the same zone so multi-motor toys alternate.

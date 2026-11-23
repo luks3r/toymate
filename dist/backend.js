@@ -4,6 +4,7 @@ var FEELS = ["steady", "pulse", "wave", "tease", "build", "throb", "random"];
 var TEMPOS = ["slow", "medium", "fast"];
 var ACCENTS = ["spike", "pause", "flutter"];
 var ALL_ZONES = "all";
+var MAX_SPREAD = 50;
 var isFeel = (value) => FEELS.includes(value);
 var isTempo = (value) => TEMPOS.includes(value);
 var isAccent = (value) => ACCENTS.includes(value);
@@ -15,6 +16,8 @@ function clampLevel(value, max = 100) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+var finite = (v) => typeof v === "number" && Number.isFinite(v);
+var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 function parseIntent(raw, zones, maxLevel = 100) {
   if (!isRecord(raw))
     return null;
@@ -27,17 +30,26 @@ function parseIntent(raw, zones, maxLevel = 100) {
   if (action !== "scene" && action !== "set")
     return null;
   const intent = { kind: "scene", zone };
-  if (typeof raw.level === "number" && Number.isFinite(raw.level))
+  if (finite(raw.level))
     intent.level = clampLevel(raw.level, maxLevel);
-  if (typeof raw.delta === "number" && Number.isFinite(raw.delta))
-    intent.delta = Math.max(-100, Math.min(100, Math.round(raw.delta)));
+  if (finite(raw.delta))
+    intent.delta = Math.round(clamp(raw.delta, -100, 100));
+  if (finite(raw.to))
+    intent.to = clampLevel(raw.to, maxLevel);
+  const over = raw.overSec ?? raw.over;
+  if (finite(over) && intent.to !== undefined)
+    intent.overSec = Math.round(clamp(over, 0.5, 600) * 10) / 10;
+  if (finite(raw.spread) && raw.spread > 0)
+    intent.spread = Math.round(clamp(raw.spread, 0, MAX_SPREAD));
+  const forSec = raw.forSec ?? raw.for;
+  if (finite(forSec) && forSec > 0)
+    intent.forSec = Math.round(clamp(forSec, 1, 600));
   if (isFeel(raw.feel))
     intent.feel = raw.feel;
   if (isTempo(raw.tempo))
     intent.tempo = raw.tempo;
-  if (intent.level === undefined && intent.delta === undefined && !intent.feel && !intent.tempo)
-    return null;
-  return intent;
+  const { kind: _k, zone: _z, ...fields } = intent;
+  return Object.keys(fields).length ? intent : null;
 }
 
 // src/shared/settings.ts
@@ -66,7 +78,7 @@ var DEFAULT_SETTINGS = {
   rules: [],
   streamPulse: false,
   safewords: { stop: "red", ease: "yellow" },
-  story: { connectionId: null, readingCps: 15, awareness: false },
+  story: { connectionId: null, readingCps: 15, minReplySec: 30, maxReplySec: 300, afterReply: "hold", awareness: false },
   chatModes: {},
   characterModes: {}
 };
@@ -164,6 +176,9 @@ function parseSettings(raw) {
     story: {
       connectionId: typeof story.connectionId === "string" && story.connectionId ? story.connectionId : null,
       readingCps: num(story.readingCps, d.story.readingCps, 3, 100),
+      minReplySec: num(story.minReplySec, d.story.minReplySec, 0, 1800),
+      maxReplySec: num(story.maxReplySec, d.story.maxReplySec, Math.max(5, num(story.minReplySec, d.story.minReplySec, 0, 1800)), 3600),
+      afterReply: story.afterReply === "fade" ? "fade" : "hold",
       awareness: bool(story.awareness, d.story.awareness)
     },
     chatModes: parseModes(r.chatModes, true),
@@ -187,6 +202,36 @@ function withAwareness(messages, ctx, settings, status) {
   const index = last?.role === "assistant" ? messages.length - 1 : messages.length;
   const out = [...messages.slice(0, index), note, ...messages.slice(index)];
   return { messages: out, breakdown: [{ messageIndex: index, name: "Toymate" }] };
+}
+
+// src/backend/last-reply.ts
+async function lastReplyRequest(api, m, userId) {
+  let chat;
+  let messages;
+  try {
+    chat = await api.chats.get(m.chatId, userId);
+    messages = chat ? await api.chat.getMessages(m.chatId, { tail: 12, light: true, includeExtra: false }) : [];
+  } catch (error) {
+    if (/permission/i.test(String(error)))
+      throw new Error("Planning an earlier reply needs the chats and chat_mutation permissions. Grant them to Toymate in the Extensions panel.");
+    throw error;
+  }
+  if (!chat)
+    throw new Error("Chat not found.");
+  const visible = messages.filter((x) => !x.hidden);
+  const lastIndex = visible.findLastIndex((x) => x.role === "assistant" && x.content.trim());
+  if (lastIndex < 0)
+    throw new Error("This chat has no character reply to plan yet.");
+  const previousUser = visible.slice(0, lastIndex).findLast((x) => x.role === "user");
+  return {
+    type: "plan_request",
+    requestId: m.requestId,
+    chatId: m.chatId,
+    characterId: m.characterId,
+    content: visible[lastIndex].content.slice(0, 40000),
+    previousUserMessage: previousUser?.content.slice(0, 8000) ?? "",
+    status: m.status
+  };
 }
 
 // src/shared/plan.ts
@@ -221,7 +266,11 @@ function planTool(zones) {
               sentence: { type: "integer", minimum: 1, description: "Sentence number where the cue starts." },
               action: { type: "string", enum: ["set", "accent", "stop"] },
               zone: { type: "string", enum: ["all", ...zones] },
-              level: { type: "integer", minimum: 0, maximum: 100, description: "For set: strength 0-100." },
+              level: { type: "integer", minimum: 0, maximum: 100, description: "For set: strength 0-100 at the start of the cue." },
+              to: { type: "integer", minimum: 0, maximum: 100, description: "For set: ramp gradually from level to this strength." },
+              over: { type: "number", minimum: 0.5, description: "For set with to: ramp length in seconds (default: until the next cue)." },
+              spread: { type: "integer", minimum: 0, maximum: 50, description: "For set: random variation \xB1 around the level, for unpredictability." },
+              for: { type: "number", minimum: 1, description: "For set: temporary change; after this many seconds it returns to what was before." },
               feel: { type: "string", enum: [...FEELS], description: "For set: texture." },
               tempo: { type: "string", enum: [...TEMPOS], description: "For set: speed of the texture." },
               accent: { type: "string", enum: [...ACCENTS], description: "For accent: brief overlay." }
@@ -251,9 +300,13 @@ function parsePlan(args, opts) {
   }
   return cues.sort((a, b) => a.sentence - b.sentence);
 }
+function playbackMs(textLength, pace) {
+  const reading = textLength / pace.readingCps;
+  return Math.round(Math.min(pace.maxReplySec, Math.max(pace.minReplySec, reading)) * 1000);
+}
 
 // src/backend/planner.ts
-var JSON_ANSWER = 'Answer with only JSON, no prose: {"cues":[{"sentence":1,"action":"set","zone":"all","level":30,"feel":"wave","tempo":"slow"}]}. ' + 'action is "set", "accent" (with "accent") or "stop". Omit fields you do not change.';
+var JSON_ANSWER = 'Answer with only JSON, no prose: {"cues":[{"sentence":1,"action":"set","zone":"all","level":30,"to":60,"feel":"wave","tempo":"slow","spread":10}]}. ' + 'action is "set", "accent" (with "accent") or "stop". Optional set fields: to, over, spread, for. Omit fields you do not change.';
 function buildPlannerMessages(req, settings, withTools = true) {
   const sentences = splitSentences(req.content);
   const zones = settings.zones.join(", ");
@@ -264,6 +317,8 @@ function buildPlannerMessages(req, settings, withTools = true) {
     `Zones: ${zones} (or "all"). Levels are 0-100; never exceed ${settings.limits.maxLevel}.`,
     "Feels: steady, pulse, wave, tease (on/off with pauses), build (rises over time), throb (slow deep pulses), random. Tempos: slow, medium, fast.",
     "Accents are brief overlays: spike (surge), pause (brief stop), flutter (fast flicker). Use stop when contact ends.",
+    "Make it dynamic: use to (with optional over, in seconds) for gradual rises and falls, spread for unpredictable variation, and for (seconds) for a temporary change that then returns to what was before.",
+    `The whole reply plays over about ${Math.round(playbackMs(req.content.length, settings.story) / 1000)} seconds; keep durations within that.`,
     "Follow the story: calm or non-physical passages get low levels or a stop; escalate only when the prose does. Usually 0 to 6 cues. An empty list is fine.",
     `Respect what the user asked for in the state line. ${withTools ? "Do not write prose; only call the tool." : JSON_ANSWER}`
   ].join(`
@@ -366,6 +421,13 @@ function parseFrontendMessage(raw) {
       return { type: raw.type };
     case "save_settings":
       return { type: "save_settings", settings: raw.settings };
+    case "plan_last": {
+      const requestId = text(raw.requestId, 64);
+      const chatId = text(raw.chatId, 128);
+      if (!requestId || !chatId)
+        return null;
+      return { type: "plan_last", requestId, chatId, characterId: text(raw.characterId, 128), status: text(raw.status, 1000) ?? "" };
+    }
     case "plan_cancel": {
       const requestId = text(raw.requestId, 64);
       return requestId ? { type: "plan_cancel", requestId } : null;
@@ -437,11 +499,13 @@ spindle.onFrontendMessage(async (raw, userId, frontendSessionId) => {
       case "plan_cancel":
         planner.cancel(message.requestId);
         break;
-      case "plan_request": {
+      case "plan_request":
+      case "plan_last": {
         const settings = await loadSettings(userId);
         try {
-          const cues = await planner.plan(message, settings, userId);
-          reply({ type: "plan_result", requestId: message.requestId, cues });
+          const req = message.type === "plan_request" ? message : await lastReplyRequest(spindle, message, userId);
+          const cues = await planner.plan(req, settings, userId);
+          reply({ type: "plan_result", requestId: message.requestId, cues, ...message.type === "plan_last" ? { content: req.content } : {} });
         } catch (error) {
           if (error instanceof Error && error.name === "AbortError")
             return;

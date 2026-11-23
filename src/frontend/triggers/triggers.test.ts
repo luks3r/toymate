@@ -9,7 +9,7 @@ import { Triggers } from "./wiring";
 function setup(over: object = {}) {
   let settings: Settings = parseSettings({
     limits: { maxLevel: 100, rampPerSecond: 1000 },
-    story: { readingCps: 10 },
+    story: { readingCps: 10, minReplySec: 0 },
     chatModes: { story: "story", reactive: "reactive" },
     rules: [
       { id: "kiss", when: "character_message", match: "kiss", then: { kind: "scene", zone: "all", level: 40 } },
@@ -154,6 +154,31 @@ describe("Story mode plans", () => {
     t.emit("MESSAGE_SENT", { chatId: "story", message: { is_user: true, content: "(red)" } });
     t.triggers.resumeFrom(0);
     expect(t.engine.view().paused).toBe(true);
+  });
+
+  it("stretches a short reply to the minimum playback and fills ramp lengths", () => {
+    const t = setup({ story: { readingCps: 10, minReplySec: 34, afterReply: "fade" } });
+    t.reply("g1", "Aaaa aaaa. Bbbbb.");
+    t.triggers.onPlanResult("g1", [
+      { sentence: 1, intent: { kind: "scene", zone: "all", level: 10, to: 60 } },
+      { sentence: 2, intent: { kind: "scene", zone: "all", level: 30 } },
+    ]);
+    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([1000, 23_000]);
+    expect(t.triggers.plan.cues[0]!.label).toBe("10→60 over 22s");
+    // two cues plus the fade at the end of playback
+    expect(t.engine.view().pendingCues).toBe(3);
+  });
+
+  it("plans the chat's last reply on request, from the reply text the backend returns", async () => {
+    const t = setup();
+    await t.engine.panic();
+    t.triggers.requestLastPlan();
+    const req = t.sent.find((m) => m.type === "plan_last");
+    expect(req).toMatchObject({ chatId: "story", characterId: "c1" });
+    expect(t.engine.view().paused).toBe(false);
+    t.setNow(5000);
+    t.triggers.onPlanResult(req!.type === "plan_last" ? req!.requestId : "", [{ sentence: 2, intent: { kind: "scene", zone: "all", level: 40 } }], "Aaaa aaaa. Bbbbb.");
+    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([6100]);
   });
 
   it("drops plans for superseded or stopped replies", () => {

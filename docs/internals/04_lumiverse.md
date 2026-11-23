@@ -4,7 +4,7 @@ Reference: `.repos/Lumiverse/developer-docs/docs` and the `lumiverse-spindle-typ
 
 ## Extension shape
 
-- `spindle.json` declares permissions. Adding a permission later makes users re-grant it, so add each one in the milestone that needs it, not earlier. Story mode needs `generation` (planner) and, for character awareness, `interceptor`.
+- `spindle.json` declares permissions. Adding a permission later makes users re-grant it, so add each one in the milestone that needs it, not earlier. Story mode needs `generation` (planner), `interceptor` for character awareness, and `chats` plus `chat_mutation` for planning an earlier reply. Each is optional at runtime: a missing grant disables only its feature.
 - The backend runs in a separate Bun process (default `process` runtime mode, `sandbox` on macOS if the operator enables it). Do not assume network or filesystem access beyond Spindle APIs. The backend never needs to reach Intiface.
 - The install scanner inspects the backend bundle and blocks patterns such as `eval`, `new Function`, and base64 decoding. Keep backend dependencies minimal and check new ones.
 - Settings use `spindle.userStorage` (per user, even on operator-scoped installs).
@@ -25,7 +25,9 @@ Reference: `.repos/Lumiverse/developer-docs/docs` and the `lumiverse-spindle-typ
 - Needs the `generation` permission. Pass `userId` (required on operator-scoped installs, which local imports are), `connection_id` for the user's chosen profile, `tools` for structured output (`plan_cues`), and `signal` to abort the upstream request.
 - Many local models (Ollama, for example gemma3) reject the `tools` field with a 400. The planner retries once without tools and asks for JSON in text; small models often answer with a bare array in a code fence, which the parser accepts.
 - Toymate's own planner generations stream over the WebSocket like any other extension generation (with `extensionId`). The generation tracker must ignore them.
-- Read the reply text from `GENERATION_ENDED.content` relayed by the frontend, or from the stored message; do not trust message ids or text from the frontend without checking they belong to the user's chat.
+- Read the reply text from `GENERATION_ENDED.content` relayed by the frontend. For **Plan last reply**, the backend reads the chat with `spindle.chat.getMessages(chatId, { tail, light: true, includeExtra: false })`.
+- `spindle.chat.getMessages` resolves the chat's owner itself and does not restrict operator-scoped extensions to the caller. The chat id comes from the browser, so check ownership with `spindle.chats.get(chatId, userId)` first (`src/backend/last-reply.ts`); otherwise one user could read another user's chat.
+- The frontend cannot read message text on current hosts: `ctx.messages.get` is optional and not implemented.
 - `MESSAGE_SENT` carries `inserted: true` when a row was inserted into history rather than appended; ignore those. Lumiverse saves the reply row before a thinking model produces content, so never read reply text from the message row early; use `GENERATION_ENDED.content`.
 - `CHARACTER_MESSAGE_RENDERED` and `USER_MESSAGE_RENDERED` are render events; they fire for history. Swipe navigation (`MESSAGE_SWIPED` with `action: 'navigated'`) shows an existing variant. Neither may trigger anything.
 

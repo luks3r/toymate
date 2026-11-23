@@ -79,7 +79,7 @@ User-message triggers and safewords use `MESSAGE_SENT` with `is_user`.
 
 | State | Owner | Why |
 | --- | --- | --- |
-| Limits, calibration, zone assignments, rules, safewords, reading speed, planner connection and model, Intiface URL | Backend `userStorage`, one settings document | Survives browser changes; per user on multi-user servers |
+| Limits, calibration, zone assignments, rules, safewords, reply playback (reading speed, shortest, longest, after-reply), planner connection, Intiface URL | Backend `userStorage`, one settings document | Survives browser changes; per user on multi-user servers |
 | Per-chat mode, per-character defaults and consent | Backend `userStorage`, keyed by chat and character | Same; consent must not reset on reload |
 | Connection, devices, scenes, cue schedule, panic state, reactions since last reply | Frontend memory (reactions and scene summary are sent with each plan request) | Live state; dies with the document |
 
@@ -93,10 +93,10 @@ Always visible above the tabs: connection status with Connect/Disconnect and Sca
 
 Four tabs, ordered by how often they are needed:
 
-1. **Play** – this chat's mode as a three-way switch (Off / Reactive / Story) with a one-line explanation and a shortcut to the planner or rules, an optional "use for every chat with this character" switch, per-zone meters with lock, reactions (Less, Hold, More, Stop), the Story cue timeline with ▶ resume, and play-by-hand controls (feel chips, tempo switch, level, accents).
+1. **Play** – this chat's mode as a three-way switch (Off / Reactive / Story) with a one-line explanation and a shortcut to the planner or rules, an optional "use for every chat with this character" switch, per-zone meters with lock, reactions (Less, Hold, More, Stop), the Story cue timeline with ▶ resume and Plan last reply / Re-plan, and play-by-hand controls (feel chips, tempo, fixed level or ramp, variation, duration, accents).
 2. **Devices** – each toy with battery; each output with a live bar, zone, a "Not calibrated" badge until calibrated, and a Calibrate disclosure (floor, ceiling, 2-second tests). Zones are edited here as chips.
-3. **Rules** – rules written as sentences ("When a reply finishes with kiss, touch then play wave slow at 40 on all zones"), an example rule for empty lists, and stream pulse. Warns when the current chat is not in Reactive mode.
-4. **Settings** – safety limits, safewords, Story planner (connection, reading speed, awareness), stroker and other-toy limits, connection.
+3. **Rules** – rules written as sentences ("When a reply finishes with kiss, touch then play wave slow at 40 on all zones", plus optional ramp, variation, and duration), an example rule for empty lists, and stream pulse. Warns when the current chat is not in Reactive mode.
+4. **Settings** – safety limits, safewords, Story planner (connection, reading speed, shortest and longest playback, what happens when cues run out, awareness), stroker and other-toy limits, connection.
 
 The UI is plain DOM styled with Lumiverse theme variables. The header, zone meters, device bars, and cue status are built once and updated in place on every engine change; other parts rebuild only when settings, the device list, or the plan change, never on a timer. A floating mini-remote (needs `ui_panels`) is a later option.
 
@@ -107,3 +107,4 @@ The UI is plain DOM styled with Lumiverse theme variables. The header, zone mete
 | none | Sidebar tab, Extras action, events, storage, frontend messaging | M1–M3 |
 | `generation` | Planner call (`generate.raw`) and listing connection profiles | M4 |
 | `interceptor` | Optional character awareness note | M4 |
+| `chats`, `chat_mutation` | Plan last reply: verify chat ownership, read the last reply (read only) | 0.3 |

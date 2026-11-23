@@ -89,7 +89,7 @@ export function setup(ctx: SpindleFrontendContext) {
         break;
       }
       case "plan_result":
-        triggers.onPlanResult(m.requestId, m.cues);
+        triggers.onPlanResult(m.requestId, m.cues, m.content);
         break;
       case "plan_error":
         triggers.onPlanError(m.requestId, m.error);

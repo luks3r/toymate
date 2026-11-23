@@ -1,12 +1,12 @@
 import type { GenerationRequestDTO, GenerationResponseDTO, LlmMessageDTO } from "lumiverse-spindle-types";
 import { isRecord } from "../shared/intent";
-import { PLAN_TOOL_NAME, parsePlan, planTool, splitSentences, type PlannedCue } from "../shared/plan";
+import { PLAN_TOOL_NAME, parsePlan, planTool, playbackMs, splitSentences, type PlannedCue } from "../shared/plan";
 import type { Settings } from "../shared/settings";
 import type { PlanRequest } from "../shared/wire";
 
 const JSON_ANSWER =
-  'Answer with only JSON, no prose: {"cues":[{"sentence":1,"action":"set","zone":"all","level":30,"feel":"wave","tempo":"slow"}]}. ' +
-  'action is "set", "accent" (with "accent") or "stop". Omit fields you do not change.';
+  'Answer with only JSON, no prose: {"cues":[{"sentence":1,"action":"set","zone":"all","level":30,"to":60,"feel":"wave","tempo":"slow","spread":10}]}. ' +
+  'action is "set", "accent" (with "accent") or "stop". Optional set fields: to, over, spread, for. Omit fields you do not change.';
 
 /** `withTools` false asks for JSON in text, for providers without tool calling. */
 export function buildPlannerMessages(req: PlanRequest, settings: Settings, withTools = true): LlmMessageDTO[] {
@@ -19,6 +19,8 @@ export function buildPlannerMessages(req: PlanRequest, settings: Settings, withT
     `Zones: ${zones} (or "all"). Levels are 0-100; never exceed ${settings.limits.maxLevel}.`,
     "Feels: steady, pulse, wave, tease (on/off with pauses), build (rises over time), throb (slow deep pulses), random. Tempos: slow, medium, fast.",
     "Accents are brief overlays: spike (surge), pause (brief stop), flutter (fast flicker). Use stop when contact ends.",
+    "Make it dynamic: use to (with optional over, in seconds) for gradual rises and falls, spread for unpredictable variation, and for (seconds) for a temporary change that then returns to what was before.",
+    `The whole reply plays over about ${Math.round(playbackMs(req.content.length, settings.story) / 1000)} seconds; keep durations within that.`,
     "Follow the story: calm or non-physical passages get low levels or a stop; escalate only when the prose does. Usually 0 to 6 cues. An empty list is fine.",
     `Respect what the user asked for in the state line. ${withTools ? "Do not write prose; only call the tool." : JSON_ANSWER}`,
   ].join("\n");

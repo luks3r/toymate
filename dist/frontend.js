@@ -1683,6 +1683,7 @@ var FEELS = ["steady", "pulse", "wave", "tease", "build", "throb", "random"];
 var TEMPOS = ["slow", "medium", "fast"];
 var ACCENTS = ["spike", "pause", "flutter"];
 var ALL_ZONES = "all";
+var MAX_SPREAD = 50;
 var isFeel = (value) => FEELS.includes(value);
 var isTempo = (value) => TEMPOS.includes(value);
 var isAccent = (value) => ACCENTS.includes(value);
@@ -1694,6 +1695,8 @@ function clampLevel(value, max = 100) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+var finite = (v) => typeof v === "number" && Number.isFinite(v);
+var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 function parseIntent(raw, zones, maxLevel = 100) {
   if (!isRecord(raw))
     return null;
@@ -1706,17 +1709,26 @@ function parseIntent(raw, zones, maxLevel = 100) {
   if (action !== "scene" && action !== "set")
     return null;
   const intent = { kind: "scene", zone };
-  if (typeof raw.level === "number" && Number.isFinite(raw.level))
+  if (finite(raw.level))
     intent.level = clampLevel(raw.level, maxLevel);
-  if (typeof raw.delta === "number" && Number.isFinite(raw.delta))
-    intent.delta = Math.max(-100, Math.min(100, Math.round(raw.delta)));
+  if (finite(raw.delta))
+    intent.delta = Math.round(clamp(raw.delta, -100, 100));
+  if (finite(raw.to))
+    intent.to = clampLevel(raw.to, maxLevel);
+  const over = raw.overSec ?? raw.over;
+  if (finite(over) && intent.to !== undefined)
+    intent.overSec = Math.round(clamp(over, 0.5, 600) * 10) / 10;
+  if (finite(raw.spread) && raw.spread > 0)
+    intent.spread = Math.round(clamp(raw.spread, 0, MAX_SPREAD));
+  const forSec = raw.forSec ?? raw.for;
+  if (finite(forSec) && forSec > 0)
+    intent.forSec = Math.round(clamp(forSec, 1, 600));
   if (isFeel(raw.feel))
     intent.feel = raw.feel;
   if (isTempo(raw.tempo))
     intent.tempo = raw.tempo;
-  if (intent.level === undefined && intent.delta === undefined && !intent.feel && !intent.tempo)
-    return null;
-  return intent;
+  const { kind: _k, zone: _z, ...fields } = intent;
+  return Object.keys(fields).length ? intent : null;
 }
 function describeIntent(intent) {
   const where = intent.zone === ALL_ZONES ? "" : ` @${intent.zone}`;
@@ -1725,14 +1737,20 @@ function describeIntent(intent) {
   if (intent.kind === "accent")
     return `${intent.accent}${where}`;
   const parts = [];
-  if (intent.level !== undefined)
+  if (intent.to !== undefined)
+    parts.push(`${intent.level ?? "now"}→${intent.to}${intent.overSec ? ` over ${intent.overSec}s` : ""}`);
+  else if (intent.level !== undefined)
     parts.push(`${intent.level}`);
   if (intent.delta !== undefined)
     parts.push(`${intent.delta >= 0 ? "+" : ""}${intent.delta}`);
+  if (intent.spread)
+    parts.push(`±${intent.spread}`);
   if (intent.feel)
     parts.push(intent.feel);
   if (intent.tempo)
     parts.push(intent.tempo);
+  if (intent.forSec)
+    parts.push(`for ${intent.forSec}s`);
   return `${parts.join(" ")}${where}`;
 }
 
@@ -1762,7 +1780,7 @@ var DEFAULT_SETTINGS = {
   rules: [],
   streamPulse: false,
   safewords: { stop: "red", ease: "yellow" },
-  story: { connectionId: null, readingCps: 15, awareness: false },
+  story: { connectionId: null, readingCps: 15, minReplySec: 30, maxReplySec: 300, afterReply: "hold", awareness: false },
   chatModes: {},
   characterModes: {}
 };
@@ -1860,6 +1878,9 @@ function parseSettings(raw) {
     story: {
       connectionId: typeof story.connectionId === "string" && story.connectionId ? story.connectionId : null,
       readingCps: num(story.readingCps, d.story.readingCps, 3, 100),
+      minReplySec: num(story.minReplySec, d.story.minReplySec, 0, 1800),
+      maxReplySec: num(story.maxReplySec, d.story.maxReplySec, Math.max(5, num(story.minReplySec, d.story.minReplySec, 0, 1800)), 3600),
+      afterReply: story.afterReply === "fade" ? "fade" : "hold",
       awareness: bool(story.awareness, d.story.awareness)
     },
     chatModes: parseModes(r.chatModes, true),
@@ -2039,9 +2060,100 @@ class ButtplugAdapter {
   }
 }
 
+// src/frontend/engine/renderers.ts
+var PERIOD_MS = { slow: 4000, medium: 2000, fast: 900 };
+var BUILD_MS = { slow: 60000, medium: 30000, fast: 15000 };
+var STROKES_PER_MINUTE = { slow: 30, medium: 60, fast: 100 };
+var frac = (x) => x - Math.floor(x);
+function hash01(n) {
+  let x = Math.imul(n ^ 2654435769, 2246822507);
+  x = Math.imul(x ^ x >>> 13, 3266489909);
+  return ((x ^ x >>> 16) >>> 0) / 2 ** 32;
+}
+var TEMPO_PERIOD_MS = PERIOD_MS;
+function wander(now, periodMs, seed) {
+  const t = now / periodMs;
+  const i = Math.floor(t);
+  const a = hash01(i * 7919 + seed) * 2 - 1;
+  const b = hash01((i + 1) * 7919 + seed) * 2 - 1;
+  const f = frac(t);
+  return a + (b - a) * (f * f * (3 - 2 * f));
+}
+function envelope(feel, tempo, now, startedAt, phase = 0) {
+  const period = PERIOD_MS[tempo];
+  const p = frac((now - startedAt) / period + phase);
+  switch (feel) {
+    case "steady":
+      return 1;
+    case "pulse":
+      return p < 0.55 ? 1 : 0.15;
+    case "wave":
+      return 0.25 + 0.75 * (0.5 - 0.5 * Math.cos(2 * Math.PI * p));
+    case "tease": {
+      const q = frac((now - startedAt) / (period * 2) + phase);
+      return q < 0.35 ? 1 : 0;
+    }
+    case "build":
+      return 0.3 + 0.7 * Math.min(1, Math.max(0, (now - startedAt) / BUILD_MS[tempo]));
+    case "throb": {
+      const q = frac((now - startedAt) / (period * 1.5) + phase);
+      return 0.2 + 0.8 * Math.sin(Math.PI * q) ** 4;
+    }
+    case "random": {
+      const t = (now - startedAt) / (period / 2) + phase * 7;
+      const i = Math.floor(t);
+      const a = 0.3 + 0.7 * hash01(i);
+      const b = 0.3 + 0.7 * hash01(i + 1);
+      return a + (b - a) * frac(t);
+    }
+  }
+}
+function renderContinuous(kind, s, now, phase) {
+  if (s.level <= 0)
+    return 0;
+  const base = s.level / 100;
+  switch (kind) {
+    case "Temperature":
+      return base;
+    case "Constrict":
+    case "Inflate":
+      return s.feel === "pulse" || s.feel === "throb" ? base * envelope("throb", "slow", now, s.startedAt, phase) : base;
+    case "Rotate": {
+      const speed = base * envelope(s.feel, s.tempo, now, s.startedAt, phase);
+      const swaps = s.feel === "wave" || s.feel === "random";
+      const direction = swaps && Math.floor((now - s.startedAt) / (PERIOD_MS[s.tempo] * 2)) % 2 === 1 ? -1 : 1;
+      return speed * direction;
+    }
+    default:
+      return base * envelope(s.feel, s.tempo, now, s.startedAt, phase);
+  }
+}
+function renderStroke(s, now) {
+  if (s.level <= 0)
+    return null;
+  let spm = STROKES_PER_MINUTE[s.tempo];
+  if (s.feel === "build") {
+    const t = Math.min(1, (now - s.startedAt) / BUILD_MS[s.tempo]);
+    spm = STROKES_PER_MINUTE.slow + (spm - STROKES_PER_MINUTE.slow) * t;
+  }
+  const half = 60000 / spm / 2;
+  const id = Math.floor((now - s.startedAt) / half);
+  let length = s.level / 100;
+  if (s.feel === "tease") {
+    length *= 0.4;
+    if (id % 6 >= 4)
+      return { id, position: 0, durationMs: half };
+  } else if (s.feel !== "steady" && s.feel !== "build") {
+    length *= envelope(s.feel, "slow", now, s.startedAt);
+  }
+  return { id, position: id % 2 === 0 ? length : 0, durationMs: half };
+}
+
 // src/frontend/engine/director.ts
 var ACCENT_MS = { spike: 1500, pause: 2000, flutter: 2000 };
 var GLIDE_PER_SECOND = 80;
+var DEFAULT_RAMP_SEC = 8;
+var seedOf = (key) => [...key].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619), 2166136261) >>> 0;
 
 class Director {
   zones;
@@ -2065,7 +2177,7 @@ class Director {
   scene(key, now) {
     let s = this.scenes.get(key);
     if (!s) {
-      s = { target: 0, current: 0, feel: "steady", tempo: "medium", startedAt: now, touchedAt: now, accent: null };
+      s = { target: 0, current: 0, feel: "steady", tempo: "medium", spread: 0, startedAt: now, touchedAt: now, accent: null, ramp: null, restore: null, seed: seedOf(key) };
       this.scenes.set(key, s);
     }
     return s;
@@ -2083,22 +2195,31 @@ class Director {
       const s = this.scene(key, now);
       s.touchedAt = now;
       if (intent.kind === "stop") {
-        s.target = 0;
-        s.current = 0;
-        s.accent = null;
+        clearScene(s);
       } else if (intent.kind === "accent") {
         s.accent = { accent: intent.accent, until: now + ACCENT_MS[intent.accent] };
       } else {
+        const before = { target: s.ramp ? s.ramp.to : s.target, feel: s.feel, tempo: s.tempo, spread: s.spread, startedAt: s.startedAt };
+        s.ramp = null;
+        s.restore = null;
         if (intent.level !== undefined)
           s.target = clampLevel(intent.level);
         if (intent.delta !== undefined)
           s.target = clampLevel(s.target + intent.delta);
+        if (intent.to !== undefined) {
+          const over = (intent.overSec ?? DEFAULT_RAMP_SEC) * 1000;
+          s.ramp = { from: s.target, to: clampLevel(intent.to), start: now, end: now + over };
+        }
+        if (intent.spread !== undefined)
+          s.spread = intent.spread;
         if (intent.feel && intent.feel !== s.feel || intent.tempo && intent.tempo !== s.tempo)
           s.startedAt = now;
         if (intent.feel)
           s.feel = intent.feel;
         if (intent.tempo)
           s.tempo = intent.tempo;
+        if (intent.forSec)
+          s.restore = { at: now + intent.forSec * 1000, base: before };
       }
     }
   }
@@ -2124,9 +2245,7 @@ class Director {
   stopAll(now) {
     this.cues = [];
     for (const s of this.scenes.values()) {
-      s.target = 0;
-      s.current = 0;
-      s.accent = null;
+      clearScene(s);
       s.touchedAt = now;
     }
   }
@@ -2136,27 +2255,43 @@ class Director {
     const dt = this.lastTick === null ? 0 : Math.max(0, now - this.lastTick);
     this.lastTick = now;
     for (const s of this.scenes.values()) {
-      if (s.target > 0 && now - s.touchedAt > this.holdTimeoutMs)
+      if (s.restore && now >= s.restore.at) {
+        Object.assign(s, s.restore.base);
+        s.restore = null;
+        s.ramp = null;
+        s.touchedAt = now;
+      }
+      if (s.ramp) {
+        const p = Math.min(1, (now - s.ramp.start) / Math.max(1, s.ramp.end - s.ramp.start));
+        s.target = Math.round(s.ramp.from + (s.ramp.to - s.ramp.from) * p);
+        s.touchedAt = now;
+        if (p >= 1)
+          s.ramp = null;
+      }
+      if (s.target > 0 && now - s.touchedAt > this.holdTimeoutMs) {
         s.target = 0;
+        s.restore = null;
+      }
       if (s.accent && now >= s.accent.until)
         s.accent = null;
       const step = GLIDE_PER_SECOND * dt / 1000;
       s.current = s.current < s.target ? Math.min(s.target, s.current + step) : Math.max(s.target, s.current - step);
     }
   }
-  sample(key) {
+  sample(key, now) {
     const s = this.scenes.get(key);
     if (!s)
       return null;
+    const level = s.current > 0 && s.spread > 0 ? Math.max(1, Math.min(100, s.current + s.spread * wander(now, TEMPO_PERIOD_MS[s.tempo] * 2, s.seed))) : s.current;
     switch (s.accent?.accent) {
       case "pause":
         return { level: 0, feel: s.feel, tempo: s.tempo, startedAt: s.startedAt };
       case "spike":
-        return { level: Math.min(100, Math.max(s.current, 20) + 35), feel: "steady", tempo: s.tempo, startedAt: s.startedAt };
+        return { level: Math.min(100, Math.max(level, 20) + 35), feel: "steady", tempo: s.tempo, startedAt: s.startedAt };
       case "flutter":
-        return { level: Math.max(s.current, 30), feel: "pulse", tempo: "fast", startedAt: s.startedAt };
+        return { level: Math.max(level, 30), feel: "pulse", tempo: "fast", startedAt: s.startedAt };
       default:
-        return { level: s.current, feel: s.feel, tempo: s.tempo, startedAt: s.startedAt };
+        return { level, feel: s.feel, tempo: s.tempo, startedAt: s.startedAt };
     }
   }
   views() {
@@ -2169,6 +2304,8 @@ class Director {
         feel: s?.feel ?? "steady",
         tempo: s?.tempo ?? "medium",
         accent: s?.accent?.accent ?? null,
+        spread: s?.spread ?? 0,
+        rampTo: s?.ramp?.to ?? null,
         locked: this.locked.has(zone)
       };
     });
@@ -2180,8 +2317,16 @@ class Director {
     const active = this.views().filter((v) => v.target > 0);
     if (active.length === 0)
       return "all devices idle";
-    return active.map((v) => `${v.zone}: ${v.feel}, ${v.tempo}, level ${v.target}`).join("; ");
+    return active.map((v) => `${v.zone}: ${v.feel}, ${v.tempo}, level ${v.target}${v.rampTo !== null ? ` rising/falling to ${v.rampTo}` : ""}${v.spread ? ` ±${v.spread}` : ""}`).join("; ");
   }
+}
+function clearScene(s) {
+  s.target = 0;
+  s.current = 0;
+  s.accent = null;
+  s.ramp = null;
+  s.restore = null;
+  s.spread = 0;
 }
 
 // src/frontend/engine/governor.ts
@@ -2335,86 +2480,6 @@ class Governor {
   sentValue(key) {
     return this.states.get(key)?.lastSent ?? null;
   }
-}
-
-// src/frontend/engine/renderers.ts
-var PERIOD_MS = { slow: 4000, medium: 2000, fast: 900 };
-var BUILD_MS = { slow: 60000, medium: 30000, fast: 15000 };
-var STROKES_PER_MINUTE = { slow: 30, medium: 60, fast: 100 };
-var frac = (x) => x - Math.floor(x);
-function hash01(n) {
-  let x = Math.imul(n ^ 2654435769, 2246822507);
-  x = Math.imul(x ^ x >>> 13, 3266489909);
-  return ((x ^ x >>> 16) >>> 0) / 2 ** 32;
-}
-function envelope(feel, tempo, now, startedAt, phase = 0) {
-  const period = PERIOD_MS[tempo];
-  const p = frac((now - startedAt) / period + phase);
-  switch (feel) {
-    case "steady":
-      return 1;
-    case "pulse":
-      return p < 0.55 ? 1 : 0.15;
-    case "wave":
-      return 0.25 + 0.75 * (0.5 - 0.5 * Math.cos(2 * Math.PI * p));
-    case "tease": {
-      const q = frac((now - startedAt) / (period * 2) + phase);
-      return q < 0.35 ? 1 : 0;
-    }
-    case "build":
-      return 0.3 + 0.7 * Math.min(1, Math.max(0, (now - startedAt) / BUILD_MS[tempo]));
-    case "throb": {
-      const q = frac((now - startedAt) / (period * 1.5) + phase);
-      return 0.2 + 0.8 * Math.sin(Math.PI * q) ** 4;
-    }
-    case "random": {
-      const t = (now - startedAt) / (period / 2) + phase * 7;
-      const i = Math.floor(t);
-      const a = 0.3 + 0.7 * hash01(i);
-      const b = 0.3 + 0.7 * hash01(i + 1);
-      return a + (b - a) * frac(t);
-    }
-  }
-}
-function renderContinuous(kind, s, now, phase) {
-  if (s.level <= 0)
-    return 0;
-  const base = s.level / 100;
-  switch (kind) {
-    case "Temperature":
-      return base;
-    case "Constrict":
-    case "Inflate":
-      return s.feel === "pulse" || s.feel === "throb" ? base * envelope("throb", "slow", now, s.startedAt, phase) : base;
-    case "Rotate": {
-      const speed = base * envelope(s.feel, s.tempo, now, s.startedAt, phase);
-      const swaps = s.feel === "wave" || s.feel === "random";
-      const direction = swaps && Math.floor((now - s.startedAt) / (PERIOD_MS[s.tempo] * 2)) % 2 === 1 ? -1 : 1;
-      return speed * direction;
-    }
-    default:
-      return base * envelope(s.feel, s.tempo, now, s.startedAt, phase);
-  }
-}
-function renderStroke(s, now) {
-  if (s.level <= 0)
-    return null;
-  let spm = STROKES_PER_MINUTE[s.tempo];
-  if (s.feel === "build") {
-    const t = Math.min(1, (now - s.startedAt) / BUILD_MS[s.tempo]);
-    spm = STROKES_PER_MINUTE.slow + (spm - STROKES_PER_MINUTE.slow) * t;
-  }
-  const half = 60000 / spm / 2;
-  const id = Math.floor((now - s.startedAt) / half);
-  let length = s.level / 100;
-  if (s.feel === "tease") {
-    length *= 0.4;
-    if (id % 6 >= 4)
-      return { id, position: 0, durationMs: half };
-  } else if (s.feel !== "steady" && s.feel !== "build") {
-    length *= envelope(s.feel, "slow", now, s.startedAt);
-  }
-  return { id, position: id % 2 === 0 ? length : 0, durationMs: half };
 }
 
 // src/frontend/engine/engine.ts
@@ -2611,7 +2676,7 @@ class Engine {
           groups.set(key, [...groups.get(key) ?? [], o]);
       }
       for (const [sceneKey, group] of groups) {
-        const sample = this.director.sample(sceneKey);
+        const sample = this.director.sample(sceneKey, now);
         group.forEach((output, i) => {
           const test = this.tests.get(output.key);
           if (test && now < test.until) {
@@ -2682,10 +2747,15 @@ function splitSentences(text) {
   }
   return sentences;
 }
-function cueOffsetsMs(sentences, cues, readingCps) {
+function playbackMs(textLength, pace) {
+  const reading = textLength / pace.readingCps;
+  return Math.round(Math.min(pace.maxReplySec, Math.max(pace.minReplySec, reading)) * 1000);
+}
+function cueOffsetsMs(sentences, cues, textLength, pace) {
+  const total = playbackMs(textLength, pace);
   return cues.map((cue) => {
     const s = sentences[cue.sentence - 1];
-    return s ? Math.round(s.start / readingCps * 1000) : 0;
+    return s ? Math.round(s.start / Math.max(1, textLength) * total) : 0;
   });
 }
 
@@ -2910,7 +2980,7 @@ class Triggers {
       for (const intent of matchRules(this.host.settings().rules, { when: "character_message", text: content, characterId: g.characterId }))
         this.engine.apply(intent, "auto");
     } else if (mode === "story" && content.trim()) {
-      this.plans.set(g.id, { generation: g, content });
+      this.plans.set(g.id, { readingStart: g.firstTokenAt ?? g.startedAt, content });
       this.host.send({
         type: "plan_request",
         requestId: g.id,
@@ -2972,25 +3042,43 @@ class Triggers {
     this.setPlan({ state: "idle", detail: "", cues: [] });
     this.engine.stopEverything({ pause: false });
   }
-  onPlanResult(requestId, cues) {
+  requestLastPlan() {
+    const { chatId, characterId } = this.host.activeChat();
+    if (!chatId)
+      return;
+    for (const id of [...this.plans.keys()])
+      this.dropPlan(id);
+    if (this.engine.view().paused)
+      this.engine.resume();
+    const requestId = `last-${this.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.plans.set(requestId, { readingStart: null, content: null });
+    this.host.send({ type: "plan_last", requestId, chatId, characterId, status: this.statusLine(true) });
+    this.setPlan({ state: "planning", detail: "Planning cues for the last reply…", cues: [] });
+  }
+  onPlanResult(requestId, cues, content) {
     const pending = this.plans.get(requestId);
     if (!pending)
       return;
     this.plans.delete(requestId);
-    const settings = this.host.settings();
-    const sentences = splitSentences(pending.content);
+    const text = pending.content ?? content ?? "";
+    const pace = this.host.settings().story;
+    const sentences = splitSentences(text);
+    const offsets = cueOffsetsMs(sentences, cues, text.length, pace);
+    const endMs = playbackMs(text.length, pace);
     const plan = {
       id: requestId,
-      cues,
-      offsets: cueOffsetsMs(sentences, cues, settings.story.readingCps),
+      cues: cues.map((cue, i) => cue.intent.kind === "scene" && cue.intent.to !== undefined && cue.intent.overSec === undefined ? { ...cue, intent: { ...cue.intent, overSec: Math.max(1, Math.round(((offsets[i + 1] ?? endMs) - offsets[i]) / 1000)) } } : cue),
+      offsets,
+      endMs,
       sentences: cues.map((cue) => sentences[cue.sentence - 1]?.text.slice(0, 80) ?? "")
     };
     this.lastPlan = plan;
-    const readingStart = pending.generation.firstTokenAt ?? pending.generation.startedAt;
     const now = this.now();
+    const readingStart = pending.readingStart ?? now;
     const reached = plan.offsets.findLastIndex((o) => readingStart + o <= now);
     this.play(plan, Math.max(0, reached), readingStart);
-    const detail = cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} for the latest reply.` : "The planner chose no cues for this reply.";
+    const secs = Math.round(endMs / 1000);
+    const detail = cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} over about ${secs} s.` : "The planner chose no cues for this reply.";
     this.setPlan({ ...this.plan, detail });
   }
   resumeFrom(index) {
@@ -3002,11 +3090,17 @@ class Triggers {
     this.play(plan, index, this.now() - plan.offsets[index]);
     this.setPlan({ ...this.plan, detail: `Resumed from cue ${index + 1} of ${plan.cues.length}.` });
   }
+  hasLastPlan() {
+    return this.lastPlan !== null;
+  }
   play(plan, from, readingStart) {
     const now = this.now();
     const at = plan.offsets.map((o, i) => i < from ? null : Math.max(now, readingStart + o));
+    const scheduled = plan.cues.flatMap((cue, i) => at[i] === null ? [] : [{ at: at[i], intent: cue.intent }]);
+    if (this.host.settings().story.afterReply === "fade")
+      scheduled.push({ at: Math.max(now, readingStart + plan.endMs), intent: { kind: "scene", zone: ALL_ZONES, to: 0, overSec: 6 } });
     this.engine.cancel(plan.id);
-    this.engine.schedule(plan.id, plan.cues.flatMap((cue, i) => at[i] === null ? [] : [{ at: at[i], intent: cue.intent }]));
+    this.engine.schedule(plan.id, scheduled);
     this.setPlan({
       state: "planned",
       detail: this.plan.detail,
@@ -3110,6 +3204,21 @@ function range(value, min, max, step, onCommit, label, format = (v) => `${v}`) {
 function number(value, min, max, onCommit, label) {
   return h("input", { class: "tm-input tm-num", type: "number", min, max, value, "aria-label": label, onchange: (e) => onCommit(Number(e.target.value)) });
 }
+function optNumber(value, min, max, onCommit, label, placeholder = "–") {
+  return h("input", {
+    class: "tm-input tm-num",
+    type: "number",
+    min,
+    max,
+    value: value ?? "",
+    placeholder,
+    "aria-label": label,
+    onchange: (e) => {
+      const raw = e.target.value.trim();
+      onCommit(raw === "" ? undefined : Number(raw));
+    }
+  });
+}
 function text(value, onCommit, label, placeholder = "") {
   return h("input", { class: "tm-input", type: "text", value, placeholder, "aria-label": label, onchange: (e) => onCommit(e.target.value) });
 }
@@ -3149,6 +3258,14 @@ var KIND = {
   Led: { label: "Light", icon: "dot" }
 };
 var pct = (v) => `${v}%`;
+function withField(t, key, value) {
+  const next = { ...t };
+  if (value === undefined || !Number.isFinite(value))
+    delete next[key];
+  else
+    next[key] = value;
+  return next;
+}
 var present = (...children) => children.filter((c) => c !== null);
 function mountPanel(root, deps) {
   const { engine, triggers } = deps;
@@ -3259,19 +3376,41 @@ function mountPanel(root, deps) {
       r.lock.replaceChildren(icon(v.locked ? "lock" : "unlock"));
     }
   }
-  const draft = { zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" };
+  const draft = {
+    zone: ALL_ZONES,
+    level: 30,
+    feel: "wave",
+    tempo: "medium",
+    ramp: false,
+    to: 60,
+    overSec: 20,
+    spread: 0,
+    forSec: 0
+  };
   function renderHand() {
     const s = deps.settings();
     if (draft.zone !== ALL_ZONES && !s.zones.includes(draft.zone))
       draft.zone = ALL_ZONES;
     const send = (intent) => engine.apply(intent, "manual");
-    handBox.replaceChildren(group("Play by hand", s.zones.length > 1 ? field("Zone", select(draft.zone, [[ALL_ZONES, "All zones"], ...s.zones.map((z) => [z, z])], (z) => (draft.zone = z, renderHand()), "Zone")) : null, chips(draft.feel, FEELS, (f) => (draft.feel = f, renderHand()), "Feel"), segmented(draft.tempo, TEMPOS.map((t) => [t, t]), (t) => (draft.tempo = t, renderHand()), "Tempo"), field("Level", range(draft.level, 0, 100, 1, (v) => draft.level = v, "Level")), h("div", { class: "tm-row" }, button([icon("play"), "Play"], () => send({ kind: "scene", zone: draft.zone, level: draft.level, feel: draft.feel, tempo: draft.tempo }), "primary tm-grow"), button([icon("stop"), "Stop"], () => send({ kind: "stop", zone: draft.zone }), "", "Stop this zone (not a pause)")), h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, "Add a moment:"), ...ACCENTS.map((a) => button(a, () => send({ kind: "accent", zone: draft.zone, accent: a }), "sm", `Brief ${a} on top of what is playing`))), h("p", { class: "tm-hint" }, `Capped at level ${s.limits.maxLevel} and each toy's ceiling. Fades after ${Math.round(s.limits.holdTimeoutSec)} s without activity.`)));
+    const play = () => send({
+      kind: "scene",
+      zone: draft.zone,
+      level: draft.level,
+      feel: draft.feel,
+      tempo: draft.tempo,
+      spread: draft.spread,
+      ...draft.ramp ? { to: draft.to, overSec: draft.overSec } : {},
+      ...draft.forSec > 0 ? { forSec: draft.forSec } : {}
+    });
+    handBox.replaceChildren(group("Play by hand", s.zones.length > 1 ? field("Zone", select(draft.zone, [[ALL_ZONES, "All zones"], ...s.zones.map((z) => [z, z])], (z) => (draft.zone = z, renderHand()), "Zone")) : null, chips(draft.feel, FEELS, (f) => (draft.feel = f, renderHand()), "Feel"), segmented(draft.tempo, TEMPOS.map((t) => [t, t]), (t) => (draft.tempo = t, renderHand()), "Tempo"), segmented(draft.ramp ? "ramp" : "set", [["set", "Fixed level"], ["ramp", "Ramp"]], (v) => (draft.ramp = v === "ramp", renderHand()), "Fixed level or ramp"), field(draft.ramp ? "From" : "Level", range(draft.level, 0, 100, 1, (v) => draft.level = v, draft.ramp ? "Ramp from" : "Level")), draft.ramp ? field("To", range(draft.to, 0, 100, 1, (v) => draft.to = v, "Ramp to")) : null, draft.ramp ? field("Over", number(draft.overSec, 1, 600, (v) => draft.overSec = v, "Ramp length in seconds"), "Seconds") : null, field("Variation", range(draft.spread, 0, 50, 1, (v) => draft.spread = v, "Variation", (v) => v ? `±${v}` : "none"), "Random wander around the level", true), field("Lasts", number(draft.forSec, 0, 600, (v) => draft.forSec = v, "Lasts seconds"), "Seconds, then back to before · 0 = until changed"), h("div", { class: "tm-row" }, button([icon("play"), "Play"], play, "primary tm-grow"), button([icon("stop"), "Stop"], () => send({ kind: "stop", zone: draft.zone }), "", "Stop this zone (not a pause)")), h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, "Add a moment:"), ...ACCENTS.map((a) => button(a, () => send({ kind: "accent", zone: draft.zone, accent: a }), "sm", `Brief ${a} on top of what is playing`))), h("p", { class: "tm-hint" }, `Capped at level ${s.limits.maxLevel} and each toy's ceiling. Fades after ${Math.round(s.limits.holdTimeoutSec)} s without activity.`)));
   }
   let cueRefs = [];
   function renderCues() {
     const p = triggers.plan;
+    const { chatId, characterId } = deps.activeChat();
+    const story = chatId !== null && modeFor(deps.settings(), chatId, characterId) === "story";
     cueRefs = [];
-    if (p.state === "idle" && !p.detail) {
+    if (p.state === "idle" && !p.detail && !story) {
       cueBox.replaceChildren();
       return;
     }
@@ -3281,7 +3420,12 @@ function mountPanel(root, deps) {
       cueRefs.push({ li, state, atMs: c.atMs });
       return li;
     });
-    cueBox.replaceChildren(group("Story cues", h("p", { class: p.state === "failed" ? "tm-alert" : "tm-hint" }, p.detail), items.length ? h("ol", { class: "tm-cues" }, ...items) : null, items.length ? h("p", { class: "tm-hint" }, "Press ▶ on a cue to play the reply again from there, at your reading pace. It also ends a pause.") : null));
+    const planLast = button(triggers.hasLastPlan() ? "Re-plan" : "Plan last reply", () => triggers.requestLastPlan(), "sm", "Ask the planner for cues for the chat's last character reply");
+    planLast.disabled = p.state === "planning" || chatId === null;
+    const heading = h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, p.detail || "No cues yet. Cues arrive after the next reply, or plan the last one now."), planLast);
+    if (p.state === "failed")
+      heading.firstElementChild.className = "tm-alert tm-grow";
+    cueBox.replaceChildren(group("Story cues", heading, items.length ? h("ol", { class: "tm-cues" }, ...items) : null, items.length ? h("p", { class: "tm-hint" }, "Press ▶ on a cue to play the reply again from there. It also ends a pause.") : null));
     updateCues();
   }
   function updateCues() {
@@ -3366,13 +3510,15 @@ function mountPanel(root, deps) {
       const kind = select(t.kind, [["scene", "play"], ["accent", "accent"], ["stop", "stop"]], (k) => setThen(k === "scene" ? { kind: "scene", zone: t.zone, level: 40, feel: "wave", tempo: "medium" } : k === "accent" ? { kind: "accent", zone: t.zone, accent: "spike" } : { kind: "stop", zone: t.zone }), "Action");
       const zone = select(t.zone, zoneOpts, (z) => setThen({ ...t, zone: z }), "Zone");
       const what = t.kind === "scene" ? [select(t.feel ?? "steady", FEELS, (feel) => setThen({ ...t, feel }), "Feel"), select(t.tempo ?? "medium", TEMPOS, (tempo) => setThen({ ...t, tempo }), "Tempo")] : t.kind === "accent" ? [select(t.accent, ACCENTS, (accent) => setThen({ ...t, accent }), "Accent")] : [];
+      const dynamic = t.kind === "scene" ? h("div", { class: "tm-dyn" }, h("span", { class: "tm-word" }, "ramp to"), optNumber(t.to, 0, 100, (to) => setThen(withField(t, "to", to)), "Ramp to level"), h("span", { class: "tm-word" }, "over s"), optNumber(t.overSec, 1, 600, (overSec) => setThen(withField(t, "overSec", overSec)), "Ramp seconds"), h("span", { class: "tm-word" }, "±"), optNumber(t.spread, 0, 50, (spread) => setThen(withField(t, "spread", spread || undefined)), "Variation"), h("span", { class: "tm-word" }, "for s"), optNumber(t.forSec, 1, 600, (forSec) => setThen(withField(t, "forSec", forSec)), "Lasts seconds")) : null;
       return [
         h("div", { class: "tm-then" }, h("span", { class: "tm-word" }, "then"), kind, ...what),
-        h("div", { class: "tm-then tm-then-where" }, ...t.kind === "scene" ? [h("span", { class: "tm-word" }, "at"), number(t.level ?? 0, 0, 100, (level) => setThen({ ...t, level }), "Level")] : [h("span", {}), h("span", {})], h("span", { class: "tm-word" }, "on"), zone)
+        h("div", { class: "tm-then tm-then-where" }, ...t.kind === "scene" ? [h("span", { class: "tm-word" }, "at"), number(t.level ?? 0, 0, 100, (level) => setThen({ ...t, level }), "Level")] : [h("span", {}), h("span", {})], h("span", { class: "tm-word" }, "on"), zone),
+        dynamic
       ];
     };
     const mode = modeFor(s, chatId, characterId);
-    bodies.rules.replaceChildren(...present(chatId && mode !== "reactive" ? h("div", { class: "tm-empty" }, h("p", { class: "tm-hint" }, `Rules only run in chats set to Reactive. This chat is ${mode === "story" ? "in Story mode" : "Off"}.`), button("Use Reactive here", () => deps.update((x) => withChatMode(x, chatId, characterId, "reactive")), "sm")) : null), group("Rules", ...s.rules.length ? s.rules.map((rule, i) => h("div", { class: "tm-rule", "data-off": String(!rule.enabled) }, h("div", { class: "tm-row tm-nowrap" }, toggle(rule.enabled, (enabled) => patch(i, { enabled }), "Rule on or off"), h("span", { class: "tm-word" }, "When"), select(rule.when, RULE_TRIGGERS.map((w) => [w, TRIGGER_LABELS[w]]), (when) => patch(i, { when }), "When"), button(icon("trash"), () => setRules(s.rules.filter((_, j) => j !== i)), "ghost icon-only danger-text", "Delete rule")), h("div", { class: "tm-row" }, h("span", { class: "tm-word" }, "with"), text(rule.match, (match) => patch(i, { match }), "Match", "any text · or: kiss, touch · or /moan(s|ed)?/i")), ...thenRow(rule, i))) : [h("p", { class: "tm-hint" }, "No rules yet. A rule like “when a reply mentions kiss, play a slow wave at 40” is a good start.")], h("div", { class: "tm-row" }, button([icon("plus"), "Add rule"], () => setRules([...s.rules, newRule()]), "sm"), s.rules.length ? null : button("Add the example", () => setRules([newRule({ match: "kiss, touch, caress", then: { kind: "scene", zone: ALL_ZONES, level: 40, feel: "wave", tempo: "slow" } })]), "ghost sm"))), group("While replies stream", field("Stream pulse", toggle(s.streamPulse, (streamPulse) => deps.update((x) => ({ ...x, streamPulse })), "Stream pulse"), "Pulse along with the text as it is written")));
+    bodies.rules.replaceChildren(...present(chatId && mode !== "reactive" ? h("div", { class: "tm-empty" }, h("p", { class: "tm-hint" }, `Rules only run in chats set to Reactive. This chat is ${mode === "story" ? "in Story mode" : "Off"}.`), button("Use Reactive here", () => deps.update((x) => withChatMode(x, chatId, characterId, "reactive")), "sm")) : null), group("Rules", ...s.rules.length ? s.rules.map((rule, i) => h("div", { class: "tm-rule", "data-off": String(!rule.enabled) }, h("div", { class: "tm-row tm-nowrap" }, toggle(rule.enabled, (enabled) => patch(i, { enabled }), "Rule on or off"), h("span", { class: "tm-word" }, "When"), select(rule.when, RULE_TRIGGERS.map((w) => [w, TRIGGER_LABELS[w]]), (when) => patch(i, { when }), "When"), button(icon("trash"), () => setRules(s.rules.filter((_, j) => j !== i)), "ghost icon-only danger-text", "Delete rule")), h("div", { class: "tm-row" }, h("span", { class: "tm-word" }, "with"), text(rule.match, (match) => patch(i, { match }), "Match", "any text · or: kiss, touch · or /moan(s|ed)?/i")), ...thenRow(rule, i).filter((x) => x !== null))) : [h("p", { class: "tm-hint" }, "No rules yet. A rule like “when a reply mentions kiss, play a slow wave at 40” is a good start.")], h("div", { class: "tm-row" }, button([icon("plus"), "Add rule"], () => setRules([...s.rules, newRule()]), "sm"), s.rules.length ? null : button("Add the example", () => setRules([newRule({ match: "kiss, touch, caress", then: { kind: "scene", zone: ALL_ZONES, level: 40, feel: "wave", tempo: "slow" } })]), "ghost sm"))), group("While replies stream", field("Stream pulse", toggle(s.streamPulse, (streamPulse) => deps.update((x) => ({ ...x, streamPulse })), "Stream pulse"), "Pulse along with the text as it is written")));
   }
   function renderSettings() {
     const s = deps.settings();
@@ -3383,10 +3529,11 @@ function mountPanel(root, deps) {
     const connOpts = [["", "Active connection"], ...(conns ?? []).map((c) => [c.id, `${c.name} · ${c.model}`])];
     if (s.story.connectionId && !connOpts.some(([id]) => id === s.story.connectionId))
       connOpts.push([s.story.connectionId, "Saved connection (missing)"]);
-    bodies.settings.replaceChildren(group("Safety", field("Max level", range(L.maxLevel, 0, 100, 1, (maxLevel) => setL({ maxLevel }), "Max level"), "Nothing goes above this", true), field("Ramp speed", range(L.rampPerSecond, 5, 200, 5, (rampPerSecond) => setL({ rampPerSecond }), "Ramp", (v) => `${v}/s`), "How fast intensity may rise", true), field("Fade after", number(L.holdTimeoutSec, 10, 3600, (holdTimeoutSec) => setL({ holdTimeoutSec }), "Fade after seconds"), "Seconds without new activity"), field("Stop when I stop a reply", toggle(L.stopOnGenerationStop, (stopOnGenerationStop) => setL({ stopOnGenerationStop }), "Stop when I stop a reply"))), group("Safewords", field("Stop everything", text(s.safewords.stop, (stop) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, stop } })), "Stop safeword")), field("Slow down", text(s.safewords.ease, (ease) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, ease } })), "Slow-down safeword")), h("p", { class: "tm-hint" }, `Send one as the whole message or out of character, like “(${s.safewords.stop})” or “OOC: ${s.safewords.stop}”. Stop pauses Toymate and turns Story mode off for the chat.`)), group("Story planner", field("Connection", select(s.story.connectionId ?? "", connOpts, (id) => setStory({ connectionId: id || null }), "Planner connection"), undefined, true), conns === null ? button("Load connections", () => deps.requestConnections(), "ghost sm") : null, h("p", { class: "tm-hint" }, "Each reply is sent to this connection. Use the provider you already roleplay with, or a local model. A small, fast, non-thinking model works best."), field("Reading speed", number(s.story.readingCps, 3, 100, (readingCps) => setStory({ readingCps }), "Reading speed"), "Characters per second; cues follow it"), field("Character awareness", toggle(s.story.awareness, (awareness) => setStory({ awareness }), "Character awareness"), "Tell the roleplay model about your toys")), group("Strokers", field("Max speed", range(L.strokeMaxSpeed, 0.1, 5, 0.1, (strokeMaxSpeed) => setL({ strokeMaxSpeed }), "Max stroke speed", (v) => `${v}/s`), "Full strokes per second", true), field("Lowest point", range(L.strokeMin, 0, 100, 1, (strokeMin) => setL({ strokeMin, strokeMax: Math.max(strokeMin, L.strokeMax) }), "Stroke range min", pct), undefined, true), field("Highest point", range(L.strokeMax, 0, 100, 1, (strokeMax) => setL({ strokeMax, strokeMin: Math.min(L.strokeMin, strokeMax) }), "Stroke range max", pct), undefined, true)), group("Other toys", field("Air pump max hold", number(L.constrictMaxHoldSec, 2, 600, (constrictMaxHoldSec) => setL({ constrictMaxHoldSec }), "Air pump max hold"), "Seconds before it releases"), field("Warmth cap", range(L.temperatureMax, 0, 100, 1, (temperatureMax) => setL({ temperatureMax }), "Warmth cap", pct), undefined, true), field("Direction change gap", number(L.rotateSwapMinMs, 200, 60000, (rotateSwapMinMs) => setL({ rotateSwapMinMs }), "Rotation direction change gap"), "Milliseconds between reversals")), group("Connection", field("Intiface address", text(s.intifaceUrl, (intifaceUrl) => deps.update((x) => ({ ...x, intifaceUrl: intifaceUrl.trim() })), "Intiface address", "ws://127.0.0.1:12345"), undefined, true), field("Connect automatically", toggle(s.autoConnect, (autoConnect) => deps.update((x) => ({ ...x, autoConnect })), "Connect automatically"), "When Lumiverse opens")));
+    bodies.settings.replaceChildren(group("Safety", field("Max level", range(L.maxLevel, 0, 100, 1, (maxLevel) => setL({ maxLevel }), "Max level"), "Nothing goes above this", true), field("Ramp speed", range(L.rampPerSecond, 5, 200, 5, (rampPerSecond) => setL({ rampPerSecond }), "Ramp", (v) => `${v}/s`), "How fast intensity may rise", true), field("Fade after", number(L.holdTimeoutSec, 10, 3600, (holdTimeoutSec) => setL({ holdTimeoutSec }), "Fade after seconds"), "Seconds without new activity"), field("Stop when I stop a reply", toggle(L.stopOnGenerationStop, (stopOnGenerationStop) => setL({ stopOnGenerationStop }), "Stop when I stop a reply"))), group("Safewords", field("Stop everything", text(s.safewords.stop, (stop) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, stop } })), "Stop safeword")), field("Slow down", text(s.safewords.ease, (ease) => deps.update((x) => ({ ...x, safewords: { ...x.safewords, ease } })), "Slow-down safeword")), h("p", { class: "tm-hint" }, `Send one as the whole message or out of character, like “(${s.safewords.stop})” or “OOC: ${s.safewords.stop}”. Stop pauses Toymate and turns Story mode off for the chat.`)), group("Story planner", field("Connection", select(s.story.connectionId ?? "", connOpts, (id) => setStory({ connectionId: id || null }), "Planner connection"), undefined, true), conns === null ? button("Load connections", () => deps.requestConnections(), "ghost sm") : null, h("p", { class: "tm-hint" }, "Each reply is sent to this connection. Use the provider you already roleplay with, or a local model. A small, fast, non-thinking model works best."), field("Reading speed", number(s.story.readingCps, 3, 100, (readingCps) => setStory({ readingCps }), "Reading speed"), "Characters per second"), field("Shortest playback", number(s.story.minReplySec, 0, 1800, (minReplySec) => setStory({ minReplySec }), "Shortest playback seconds"), "Seconds; short replies stretch to this"), field("Longest playback", number(s.story.maxReplySec, 5, 3600, (maxReplySec) => setStory({ maxReplySec }), "Longest playback seconds"), "Seconds; long replies compress to this"), field("When the cues run out", segmented(s.story.afterReply, [["hold", "Keep going"], ["fade", "Fade out"]], (afterReply) => setStory({ afterReply }), "When the cues run out"), undefined, true), h("p", { class: "tm-hint" }, `A reply plays for its reading time at ${s.story.readingCps} chars/s, but never less than ${s.story.minReplySec} s or more than ${s.story.maxReplySec} s.`), field("Character awareness", toggle(s.story.awareness, (awareness) => setStory({ awareness }), "Character awareness"), "Tell the roleplay model about your toys")), group("Strokers", field("Max speed", range(L.strokeMaxSpeed, 0.1, 5, 0.1, (strokeMaxSpeed) => setL({ strokeMaxSpeed }), "Max stroke speed", (v) => `${v}/s`), "Full strokes per second", true), field("Lowest point", range(L.strokeMin, 0, 100, 1, (strokeMin) => setL({ strokeMin, strokeMax: Math.max(strokeMin, L.strokeMax) }), "Stroke range min", pct), undefined, true), field("Highest point", range(L.strokeMax, 0, 100, 1, (strokeMax) => setL({ strokeMax, strokeMin: Math.min(L.strokeMin, strokeMax) }), "Stroke range max", pct), undefined, true)), group("Other toys", field("Air pump max hold", number(L.constrictMaxHoldSec, 2, 600, (constrictMaxHoldSec) => setL({ constrictMaxHoldSec }), "Air pump max hold"), "Seconds before it releases"), field("Warmth cap", range(L.temperatureMax, 0, 100, 1, (temperatureMax) => setL({ temperatureMax }), "Warmth cap", pct), undefined, true), field("Direction change gap", number(L.rotateSwapMinMs, 200, 60000, (rotateSwapMinMs) => setL({ rotateSwapMinMs }), "Rotation direction change gap"), "Milliseconds between reversals")), group("Connection", field("Intiface address", text(s.intifaceUrl, (intifaceUrl) => deps.update((x) => ({ ...x, intifaceUrl: intifaceUrl.trim() })), "Intiface address", "ws://127.0.0.1:12345"), undefined, true), field("Connect automatically", toggle(s.autoConnect, (autoConnect) => deps.update((x) => ({ ...x, autoConnect })), "Connect automatically"), "When Lumiverse opens")));
   }
   const settingsChanged = () => {
     renderMode();
+    renderCues();
     renderHand();
     renderDevices(true);
     renderRules();
@@ -3409,6 +3556,7 @@ function mountPanel(root, deps) {
     chatChanged() {
       renderMode();
       renderRules();
+      renderCues();
     },
     dispose() {
       unsubEngine();
@@ -3559,6 +3707,8 @@ var PANEL_CSS = `
 .tm-then { display: grid; grid-template-columns: 2.6em 1fr 1fr 1fr; gap: 6px; align-items: center; }
 .tm-then > select { width: 100%; }
 .tm-then-where { grid-template-columns: 2.6em 1fr auto 2fr; }
+.tm-dyn { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 6px; align-items: center; }
+.tm-dyn .tm-num { width: 100%; }
 .tm-then .tm-word { min-width: 0; }
 .tm-nowrap { flex-wrap: nowrap; }
 .tm-nowrap select.tm-input { flex: 1; min-width: 0; }
@@ -3637,7 +3787,7 @@ function setup(ctx) {
         break;
       }
       case "plan_result":
-        triggers.onPlanResult(m.requestId, m.cues);
+        triggers.onPlanResult(m.requestId, m.cues, m.content);
         break;
       case "plan_error":
         triggers.onPlanError(m.requestId, m.error);

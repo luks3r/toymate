@@ -45,6 +45,10 @@ export interface StorySettings {
   /** Connection profile for the planner call; null uses the active connection. */
   connectionId: string | null;
   readingCps: number;
+  minReplySec: number;
+  maxReplySec: number;
+  /** What happens when a reply's cues run out: keep the last scene, or fade it out. */
+  afterReply: "hold" | "fade";
   awareness: boolean;
 }
 
@@ -86,7 +90,7 @@ export const DEFAULT_SETTINGS: Settings = {
   rules: [],
   streamPulse: false,
   safewords: { stop: "red", ease: "yellow" },
-  story: { connectionId: null, readingCps: 15, awareness: false },
+  story: { connectionId: null, readingCps: 15, minReplySec: 30, maxReplySec: 300, afterReply: "hold", awareness: false },
   chatModes: {},
   characterModes: {},
 };
@@ -188,6 +192,9 @@ export function parseSettings(raw: unknown): Settings {
     story: {
       connectionId: typeof story.connectionId === "string" && story.connectionId ? story.connectionId : null,
       readingCps: num(story.readingCps, d.story.readingCps, 3, 100),
+      minReplySec: num(story.minReplySec, d.story.minReplySec, 0, 1800),
+      maxReplySec: num(story.maxReplySec, d.story.maxReplySec, Math.max(5, num(story.minReplySec, d.story.minReplySec, 0, 1800)), 3600),
+      afterReply: story.afterReply === "fade" ? "fade" : "hold",
       awareness: bool(story.awareness, d.story.awareness),
     },
     chatModes: parseModes(r.chatModes, true),

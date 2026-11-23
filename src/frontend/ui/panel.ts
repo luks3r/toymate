@@ -1,10 +1,10 @@
-import { ACCENTS, ALL_ZONES, FEELS, TEMPOS, type Feel, type Intent, type Tempo } from "../../shared/intent";
+import { ACCENTS, ALL_ZONES, FEELS, TEMPOS, type Feel, type Intent, type SceneIntent, type Tempo } from "../../shared/intent";
 import { DEFAULT_OUTPUT_PREFS, RULE_TRIGGERS, modeFor, prefsFor, withChatMode, type Mode, type Rule, type Settings } from "../../shared/settings";
 import type { ConnectionSummary } from "../../shared/wire";
 import { UNDRIVEN, type DeviceInfo, type OutputInfo, type OutputKind } from "../engine/devices";
 import type { Engine } from "../engine/engine";
 import type { Triggers } from "../triggers/wiring";
-import { button, chips, field, group, h, icon, number, range, segmented, select, text, toggle, type IconName } from "./dom";
+import { button, chips, field, group, h, icon, number, optNumber, range, segmented, select, text, toggle, type IconName } from "./dom";
 
 export interface PanelDeps {
   engine: Engine;
@@ -45,6 +45,14 @@ const KIND: Record<OutputKind, { label: string; icon: IconName }> = {
 };
 
 const pct = (v: number) => `${v}%`;
+
+/** Sets or clears one optional scene field. */
+function withField<K extends "to" | "overSec" | "spread" | "forSec">(t: SceneIntent, key: K, value: number | undefined): SceneIntent {
+  const next = { ...t };
+  if (value === undefined || !Number.isFinite(value)) delete next[key];
+  else next[key] = value;
+  return next;
+}
 const present = (...children: (Node | null)[]) => children.filter((c): c is Node => c !== null);
 
 /**
@@ -247,22 +255,48 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
     }
   }
 
-  const draft: { zone: string; level: number; feel: Feel; tempo: Tempo } = { zone: ALL_ZONES, level: 30, feel: "wave", tempo: "medium" };
+  const draft: { zone: string; level: number; feel: Feel; tempo: Tempo; ramp: boolean; to: number; overSec: number; spread: number; forSec: number } = {
+    zone: ALL_ZONES,
+    level: 30,
+    feel: "wave",
+    tempo: "medium",
+    ramp: false,
+    to: 60,
+    overSec: 20,
+    spread: 0,
+    forSec: 0,
+  };
   function renderHand() {
     const s = deps.settings();
     if (draft.zone !== ALL_ZONES && !s.zones.includes(draft.zone)) draft.zone = ALL_ZONES;
     const send = (intent: Intent) => engine.apply(intent, "manual");
+    const play = () =>
+      send({
+        kind: "scene",
+        zone: draft.zone,
+        level: draft.level,
+        feel: draft.feel,
+        tempo: draft.tempo,
+        spread: draft.spread,
+        ...(draft.ramp ? { to: draft.to, overSec: draft.overSec } : {}),
+        ...(draft.forSec > 0 ? { forSec: draft.forSec } : {}),
+      });
     handBox.replaceChildren(
       group(
         "Play by hand",
         s.zones.length > 1 ? field("Zone", select(draft.zone, [[ALL_ZONES, "All zones"] as const, ...s.zones.map((z) => [z, z] as const)], (z) => ((draft.zone = z), renderHand()), "Zone")) : null,
         chips(draft.feel, FEELS, (f) => ((draft.feel = f), renderHand()), "Feel"),
         segmented(draft.tempo, TEMPOS.map((t) => [t, t] as const), (t) => ((draft.tempo = t), renderHand()), "Tempo"),
-        field("Level", range(draft.level, 0, 100, 1, (v) => (draft.level = v), "Level")),
+        segmented(draft.ramp ? "ramp" : "set", [["set", "Fixed level"], ["ramp", "Ramp"]], (v) => ((draft.ramp = v === "ramp"), renderHand()), "Fixed level or ramp"),
+        field(draft.ramp ? "From" : "Level", range(draft.level, 0, 100, 1, (v) => (draft.level = v), draft.ramp ? "Ramp from" : "Level")),
+        draft.ramp ? field("To", range(draft.to, 0, 100, 1, (v) => (draft.to = v), "Ramp to")) : null,
+        draft.ramp ? field("Over", number(draft.overSec, 1, 600, (v) => (draft.overSec = v), "Ramp length in seconds"), "Seconds") : null,
+        field("Variation", range(draft.spread, 0, 50, 1, (v) => (draft.spread = v), "Variation", (v) => (v ? `±${v}` : "none")), "Random wander around the level", true),
+        field("Lasts", number(draft.forSec, 0, 600, (v) => (draft.forSec = v), "Lasts seconds"), "Seconds, then back to before · 0 = until changed"),
         h(
           "div",
           { class: "tm-row" },
-          button([icon("play"), "Play"], () => send({ kind: "scene", zone: draft.zone, level: draft.level, feel: draft.feel, tempo: draft.tempo }), "primary tm-grow"),
+          button([icon("play"), "Play"], play, "primary tm-grow"),
           button([icon("stop"), "Stop"], () => send({ kind: "stop", zone: draft.zone }), "", "Stop this zone (not a pause)"),
         ),
         h(
@@ -280,8 +314,10 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
   let cueRefs: { li: HTMLElement; state: HTMLElement; atMs: number | null }[] = [];
   function renderCues() {
     const p = triggers.plan;
+    const { chatId, characterId } = deps.activeChat();
+    const story = chatId !== null && modeFor(deps.settings(), chatId, characterId) === "story";
     cueRefs = [];
-    if (p.state === "idle" && !p.detail) {
+    if (p.state === "idle" && !p.detail && !story) {
       cueBox.replaceChildren();
       return;
     }
@@ -291,12 +327,21 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
       cueRefs.push({ li, state, atMs: c.atMs });
       return li;
     });
+    const planLast = button(
+      triggers.hasLastPlan() ? "Re-plan" : "Plan last reply",
+      () => triggers.requestLastPlan(),
+      "sm",
+      "Ask the planner for cues for the chat's last character reply",
+    );
+    planLast.disabled = p.state === "planning" || chatId === null;
+    const heading = h("div", { class: "tm-row" }, h("span", { class: "tm-hint tm-grow" }, p.detail || "No cues yet. Cues arrive after the next reply, or plan the last one now."), planLast);
+    if (p.state === "failed") heading.firstElementChild!.className = "tm-alert tm-grow";
     cueBox.replaceChildren(
       group(
         "Story cues",
-        h("p", { class: p.state === "failed" ? "tm-alert" : "tm-hint" }, p.detail),
+        heading,
         items.length ? h("ol", { class: "tm-cues" }, ...items) : null,
-        items.length ? h("p", { class: "tm-hint" }, "Press ▶ on a cue to play the reply again from there, at your reading pace. It also ends a pause.") : null,
+        items.length ? h("p", { class: "tm-hint" }, "Press ▶ on a cue to play the reply again from there. It also ends a pause.") : null,
       ),
     );
     updateCues();
@@ -466,6 +511,21 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
           : t.kind === "accent"
             ? [select(t.accent, ACCENTS, (accent) => setThen({ ...t, accent }), "Accent")]
             : [];
+      const dynamic =
+        t.kind === "scene"
+          ? h(
+              "div",
+              { class: "tm-dyn" },
+              h("span", { class: "tm-word" }, "ramp to"),
+              optNumber(t.to, 0, 100, (to) => setThen(withField(t, "to", to)), "Ramp to level"),
+              h("span", { class: "tm-word" }, "over s"),
+              optNumber(t.overSec, 1, 600, (overSec) => setThen(withField(t, "overSec", overSec)), "Ramp seconds"),
+              h("span", { class: "tm-word" }, "±"),
+              optNumber(t.spread, 0, 50, (spread) => setThen(withField(t, "spread", spread || undefined)), "Variation"),
+              h("span", { class: "tm-word" }, "for s"),
+              optNumber(t.forSec, 1, 600, (forSec) => setThen(withField(t, "forSec", forSec)), "Lasts seconds"),
+            )
+          : null;
       return [
         h("div", { class: "tm-then" }, h("span", { class: "tm-word" }, "then"), kind, ...what),
         h(
@@ -475,6 +535,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
           h("span", { class: "tm-word" }, "on"),
           zone,
         ),
+        dynamic,
       ];
     };
 
@@ -504,7 +565,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
                   button(icon("trash"), () => setRules(s.rules.filter((_, j) => j !== i)), "ghost icon-only danger-text", "Delete rule"),
                 ),
                 h("div", { class: "tm-row" }, h("span", { class: "tm-word" }, "with"), text(rule.match, (match) => patch(i, { match }), "Match", "any text · or: kiss, touch · or /moan(s|ed)?/i")),
-                ...thenRow(rule, i),
+                ...thenRow(rule, i).filter((x) => x !== null),
               ),
             )
           : [h("p", { class: "tm-hint" }, "No rules yet. A rule like “when a reply mentions kiss, play a slow wave at 40” is a good start.")]),
@@ -548,7 +609,16 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
         field("Connection", select(s.story.connectionId ?? "", connOpts, (id) => setStory({ connectionId: id || null }), "Planner connection"), undefined, true),
         conns === null ? button("Load connections", () => deps.requestConnections(), "ghost sm") : null,
         h("p", { class: "tm-hint" }, "Each reply is sent to this connection. Use the provider you already roleplay with, or a local model. A small, fast, non-thinking model works best."),
-        field("Reading speed", number(s.story.readingCps, 3, 100, (readingCps) => setStory({ readingCps }), "Reading speed"), "Characters per second; cues follow it"),
+        field("Reading speed", number(s.story.readingCps, 3, 100, (readingCps) => setStory({ readingCps }), "Reading speed"), "Characters per second"),
+        field("Shortest playback", number(s.story.minReplySec, 0, 1800, (minReplySec) => setStory({ minReplySec }), "Shortest playback seconds"), "Seconds; short replies stretch to this"),
+        field("Longest playback", number(s.story.maxReplySec, 5, 3600, (maxReplySec) => setStory({ maxReplySec }), "Longest playback seconds"), "Seconds; long replies compress to this"),
+        field(
+          "When the cues run out",
+          segmented(s.story.afterReply, [["hold", "Keep going"], ["fade", "Fade out"]], (afterReply) => setStory({ afterReply }), "When the cues run out"),
+          undefined,
+          true,
+        ),
+        h("p", { class: "tm-hint" }, `A reply plays for its reading time at ${s.story.readingCps} chars/s, but never less than ${s.story.minReplySec} s or more than ${s.story.maxReplySec} s.`),
         field("Character awareness", toggle(s.story.awareness, (awareness) => setStory({ awareness }), "Character awareness"), "Tell the roleplay model about your toys"),
       ),
       group(
@@ -574,6 +644,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
   // ── wiring ─────────────────────────────────────────────────────────────
   const settingsChanged = () => {
     renderMode();
+    renderCues();
     renderHand();
     renderDevices(true);
     renderRules();
@@ -599,6 +670,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
     chatChanged() {
       renderMode();
       renderRules();
+      renderCues();
     },
     dispose() {
       unsubEngine();

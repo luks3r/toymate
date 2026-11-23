@@ -137,6 +137,8 @@ export const PANEL_CSS = `
 .tm-then { display: grid; grid-template-columns: 2.6em 1fr 1fr 1fr; gap: 6px; align-items: center; }
 .tm-then > select { width: 100%; }
 .tm-then-where { grid-template-columns: 2.6em 1fr auto 2fr; }
+.tm-dyn { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 6px; align-items: center; }
+.tm-dyn .tm-num { width: 100%; }
 .tm-then .tm-word { min-width: 0; }
 .tm-nowrap { flex-wrap: nowrap; }
 .tm-nowrap select.tm-input { flex: 1; min-width: 0; }

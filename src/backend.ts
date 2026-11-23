@@ -1,5 +1,6 @@
 import type { SpindleAPI } from "lumiverse-spindle-types";
 import { withAwareness } from "./backend/awareness";
+import { lastReplyRequest } from "./backend/last-reply";
 import { Planner } from "./backend/planner";
 import { parseSettings, type Settings } from "./shared/settings";
 import { parseFrontendMessage, type BackendMessage } from "./shared/wire";
@@ -56,11 +57,13 @@ spindle.onFrontendMessage(async (raw, userId, frontendSessionId) => {
       case "plan_cancel":
         planner.cancel(message.requestId);
         break;
-      case "plan_request": {
+      case "plan_request":
+      case "plan_last": {
         const settings = await loadSettings(userId);
         try {
-          const cues = await planner.plan(message, settings, userId);
-          reply({ type: "plan_result", requestId: message.requestId, cues });
+          const req = message.type === "plan_request" ? message : await lastReplyRequest(spindle, message, userId);
+          const cues = await planner.plan(req, settings, userId);
+          reply({ type: "plan_result", requestId: message.requestId, cues, ...(message.type === "plan_last" ? { content: req.content } : {}) });
         } catch (error) {
           if (error instanceof Error && error.name === "AbortError") return;
           reply({ type: "plan_error", requestId: message.requestId, error: String(error instanceof Error ? error.message : error).slice(0, 300) });

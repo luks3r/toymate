@@ -47,7 +47,11 @@ export function planTool(zones: readonly string[]) {
               sentence: { type: "integer", minimum: 1, description: "Sentence number where the cue starts." },
               action: { type: "string", enum: ["set", "accent", "stop"] },
               zone: { type: "string", enum: ["all", ...zones] },
-              level: { type: "integer", minimum: 0, maximum: 100, description: "For set: strength 0-100." },
+              level: { type: "integer", minimum: 0, maximum: 100, description: "For set: strength 0-100 at the start of the cue." },
+              to: { type: "integer", minimum: 0, maximum: 100, description: "For set: ramp gradually from level to this strength." },
+              over: { type: "number", minimum: 0.5, description: "For set with to: ramp length in seconds (default: until the next cue)." },
+              spread: { type: "integer", minimum: 0, maximum: 50, description: "For set: random variation ± around the level, for unpredictability." },
+              for: { type: "number", minimum: 1, description: "For set: temporary change; after this many seconds it returns to what was before." },
               feel: { type: "string", enum: [...FEELS], description: "For set: texture." },
               tempo: { type: "string", enum: [...TEMPOS], description: "For set: speed of the texture." },
               accent: { type: "string", enum: [...ACCENTS], description: "For accent: brief overlay." },
@@ -79,10 +83,25 @@ export function parsePlan(args: unknown, opts: { sentenceCount: number; zones: r
   return cues.sort((a, b) => a.sentence - b.sentence);
 }
 
-/** Milliseconds from the start of reading until the reader reaches each cue's sentence. */
-export function cueOffsetsMs(sentences: readonly Sentence[], cues: readonly PlannedCue[], readingCps: number): number[] {
+export interface Pace {
+  readingCps: number;
+  /** Short replies stretch to at least this long. */
+  minReplySec: number;
+  /** Long replies compress to at most this long. */
+  maxReplySec: number;
+}
+
+/** How long a reply's cues play: reading time, clamped to the user's min and max. */
+export function playbackMs(textLength: number, pace: Pace): number {
+  const reading = textLength / pace.readingCps;
+  return Math.round(Math.min(pace.maxReplySec, Math.max(pace.minReplySec, reading)) * 1000);
+}
+
+/** Milliseconds from the start of playback to each cue's sentence, spread over the playback length. */
+export function cueOffsetsMs(sentences: readonly Sentence[], cues: readonly PlannedCue[], textLength: number, pace: Pace): number[] {
+  const total = playbackMs(textLength, pace);
   return cues.map((cue) => {
     const s = sentences[cue.sentence - 1];
-    return s ? Math.round((s.start / readingCps) * 1000) : 0;
+    return s ? Math.round((s.start / Math.max(1, textLength)) * total) : 0;
   });
 }

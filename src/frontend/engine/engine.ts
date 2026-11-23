@@ -254,7 +254,7 @@ export class Engine {
         if (key) groups.set(key, [...(groups.get(key) ?? []), o]);
       }
       for (const [sceneKey, group] of groups) {
-        const sample = this.director.sample(sceneKey);
+        const sample = this.director.sample(sceneKey, now);
         group.forEach((output, i) => {
           const test = this.tests.get(output.key);
           if (test && now < test.until) {

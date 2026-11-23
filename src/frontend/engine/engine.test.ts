@@ -115,14 +115,14 @@ describe("Director", () => {
     d.tick(0);
     d.apply({ kind: "scene", zone: "all", level: 80 }, 0, "auto");
     d.tick(500);
-    expect(d.sample("main")!.level).toBe(40);
+    expect(d.sample("main", 0)!.level).toBe(40);
     d.tick(1000);
-    expect(d.sample("main")!.level).toBe(80);
+    expect(d.sample("main", 0)!.level).toBe(80);
     d.tick(11_001);
     d.tick(12_000);
-    expect(d.sample("main")!.level).toBeLessThan(80);
+    expect(d.sample("main", 0)!.level).toBeLessThan(80);
     d.tick(13_000);
-    expect(d.sample("main")!.level).toBe(0);
+    expect(d.sample("main", 0)!.level).toBe(0);
   });
 
   it("stop is immediate, locks ignore auto sources, deltas are relative", () => {
@@ -131,20 +131,20 @@ describe("Director", () => {
     d.apply({ kind: "scene", zone: "main", delta: 15 }, 0, "auto");
     d.tick(0);
     d.tick(2000);
-    expect(d.sample("main")!.level).toBe(65);
+    expect(d.sample("main", 0)!.level).toBe(65);
     d.setLocked("main", true);
     d.apply({ kind: "stop", zone: "all" }, 2000, "auto");
-    expect(d.sample("main")!.level).toBe(65);
+    expect(d.sample("main", 0)!.level).toBe(65);
     d.apply({ kind: "stop", zone: "main" }, 2000, "manual");
-    expect(d.sample("main")!.level).toBe(0);
+    expect(d.sample("main", 0)!.level).toBe(0);
   });
 
   it("all does not reach named-only scenes; a named zone does", () => {
     const d = new Director(["main"], 60_000);
     d.apply({ kind: "scene", zone: "all", level: 50 }, 0, "auto");
-    expect(d.sample("main:named")).toBeNull();
+    expect(d.sample("main:named", 0)).toBeNull();
     d.apply({ kind: "scene", zone: "main", level: 30 }, 0, "auto");
-    expect(d.sample("main:named")).not.toBeNull();
+    expect(d.sample("main:named", 0)).not.toBeNull();
   });
 
   it("runs scheduled cues at their time and cancels by group", () => {
@@ -153,11 +153,54 @@ describe("Director", () => {
     d.schedule("g2", [{ at: 1500, intent: { kind: "scene", zone: "all", level: 90 } }]);
     d.cancel("g2");
     d.tick(999);
-    expect(d.sample("main")).toBeNull();
+    expect(d.sample("main", 0)).toBeNull();
     d.tick(1000);
     d.tick(3000);
-    expect(d.sample("main")!.level).toBe(40);
+    expect(d.sample("main", 0)!.level).toBe(40);
     expect(d.pending()).toHaveLength(0);
+  });
+
+  it("ramps from level to `to` over the given time", () => {
+    const d = new Director(["main"], 60_000);
+    d.tick(0);
+    d.apply({ kind: "scene", zone: "main", level: 20, to: 80, overSec: 10 }, 0, "auto");
+    for (let t = 0; t <= 5000; t += 100) d.tick(t);
+    expect(d.views()[0]!.target).toBe(50);
+    expect(d.views()[0]!.rampTo).toBe(80);
+    for (let t = 5100; t <= 12_000; t += 100) d.tick(t);
+    expect(d.views()[0]).toMatchObject({ target: 80, rampTo: null });
+  });
+
+  it("a temporary change returns to what it replaced", () => {
+    const d = new Director(["main"], 60_000);
+    d.apply({ kind: "scene", zone: "main", level: 30, feel: "wave" }, 0, "auto");
+    d.apply({ kind: "scene", zone: "main", level: 70, feel: "pulse", forSec: 5 }, 1000, "auto");
+    d.tick(1000);
+    expect(d.views()[0]).toMatchObject({ target: 70, feel: "pulse" });
+    d.tick(6000);
+    expect(d.views()[0]).toMatchObject({ target: 30, feel: "wave" });
+  });
+
+  it("a newer change cancels a pending return", () => {
+    const d = new Director(["main"], 60_000);
+    d.apply({ kind: "scene", zone: "main", level: 30 }, 0, "auto");
+    d.apply({ kind: "scene", zone: "main", level: 70, forSec: 5 }, 1000, "auto");
+    d.apply({ kind: "scene", zone: "main", level: 50 }, 2000, "auto");
+    d.tick(7000);
+    expect(d.views()[0]!.target).toBe(50);
+  });
+
+  it("spread wanders within ± range around the level and stays off when stopped", () => {
+    const d = new Director(["main"], 600_000);
+    d.apply({ kind: "scene", zone: "main", level: 50, spread: 20, tempo: "fast" }, 0, "auto");
+    d.tick(0);
+    d.tick(2000);
+    const levels = Array.from({ length: 200 }, (_, i) => d.sample("main", 2000 + i * 150)!.level);
+    expect(Math.min(...levels)).toBeGreaterThanOrEqual(30);
+    expect(Math.max(...levels)).toBeLessThanOrEqual(70);
+    expect(Math.max(...levels) - Math.min(...levels)).toBeGreaterThan(10);
+    d.apply({ kind: "stop", zone: "main" }, 3000, "auto");
+    expect(d.sample("main", 3000)!.level).toBe(0);
   });
 
   it("accents overlay then expire", () => {
@@ -166,9 +209,9 @@ describe("Director", () => {
     d.tick(0);
     d.tick(1000);
     d.apply({ kind: "accent", zone: "all", accent: "pause" }, 1000, "auto");
-    expect(d.sample("main")!.level).toBe(0);
+    expect(d.sample("main", 0)!.level).toBe(0);
     d.tick(3100);
-    expect(d.sample("main")!.level).toBe(40);
+    expect(d.sample("main", 0)!.level).toBe(40);
   });
 });
 

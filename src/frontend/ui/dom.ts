@@ -105,6 +105,23 @@ export function number(value: number, min: number, max: number, onCommit: (v: nu
   return h("input", { class: "tm-input tm-num", type: "number", min, max, value, "aria-label": label, onchange: (e) => onCommit(Number((e.target as HTMLInputElement).value)) });
 }
 
+/** Number input where empty means "not set". */
+export function optNumber(value: number | undefined, min: number, max: number, onCommit: (v: number | undefined) => void, label: string, placeholder = "–") {
+  return h("input", {
+    class: "tm-input tm-num",
+    type: "number",
+    min,
+    max,
+    value: value ?? "",
+    placeholder,
+    "aria-label": label,
+    onchange: (e) => {
+      const raw = (e.target as HTMLInputElement).value.trim();
+      onCommit(raw === "" ? undefined : Number(raw));
+    },
+  });
+}
+
 export function text(value: string, onCommit: (v: string) => void, label: string, placeholder = "") {
   return h("input", { class: "tm-input", type: "text", value, placeholder, "aria-label": label, onchange: (e) => onCommit((e.target as HTMLInputElement).value) });
 }

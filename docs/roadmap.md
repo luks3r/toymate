@@ -8,7 +8,8 @@ Design reasons are in [06_interaction.md](internals/06_interaction.md) and [01_a
 - **Connection and manual control:** adapter, device model, governor (calibration, max level, ramp, timing gap, dedupe, constrict hold, rotation swaps, stroke speed and range), sidebar tab, Stop all (button, Shift+Esc, Extras action), every stop path.
 - **Scenes:** director (glide, accents, hold timeout, lock), renderers for vibrate, rotate, oscillate, constrict/inflate, HwPositionWithDuration, temperature; zones; calibration UI.
 - **Reactive mode:** live generation tracker with filters, rules (character reply, user message, while streaming), stream pulse, safewords.
-- **Story mode:** planner call with `plan_cues` tool and JSON fallback, reading-paced scheduling, late plans start at the cue the reader reached, resume from any cue of the latest plan, stale-plan dropping, optional character awareness note, Story section.
+- **Dynamic scenes:** ramps (`to`/`over`), variation (`spread`), and temporary changes (`for`) in manual play, rules, and planner cues.
+- **Story mode:** planner call with `plan_cues` tool and JSON fallback, playback length that follows reply size within user bounds, fade or hold after the cues, Plan last reply / Re-plan, late plans start at the cue the reader reached, resume from any cue of the latest plan, stale-plan dropping, optional character awareness note, Story section.
 
 Verified: unit tests (`bun run check`); engine against Intiface's simulated vibrator; full flow in an isolated Lumiverse with a local Ollama model (reply → plan → cues → device, Stop all, Shift+Esc, generation stop, safeword).
 
@@ -17,7 +18,7 @@ Verified: unit tests (`bun run check`); engine against Intiface's simulated vibr
 - **Real hardware pass** (developer only): calibrate, then each feel and tempo on a real toy; check that the ramp and timing gap feel right.
 - **More device shapes:** integration pass with simulated two-motor vibrator, rotator, oscillator, stroker, and air pump. Renderers for these are unit-tested only.
 - **Lumiverse Desktop on macOS:** confirm WKWebView allows `ws://127.0.0.1` from the app page.
-- **Planner quality:** small models over-cue (13 cues for one reply in testing). Tune the prompt on two or more models, consider merging consecutive identical cues, and measure latency; plan the first paragraph while the rest streams if late plans are common.
+- **Planner quality:** small models over-cue (13 cues for one reply in testing). The dynamic-fields prompt was checked on gemma3:4b only; local thinking models (qwen3, gemma 12B) were too slow or returned nothing. Tune the prompt on two or more models, consider merging consecutive identical cues, and measure latency; plan the first paragraph while the rest streams if late plans are common.
 
 ## Later (not scheduled)
 

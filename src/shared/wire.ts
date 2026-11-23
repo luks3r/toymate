@@ -23,13 +23,15 @@ export type FrontendMessage =
   | { type: "hello" }
   | { type: "save_settings"; settings: unknown }
   | PlanRequest
+  | { type: "plan_last"; requestId: string; chatId: string; characterId: string | null; status: string }
   | { type: "plan_cancel"; requestId: string }
   | { type: "status"; chatId: string | null; status: string }
   | { type: "list_connections" };
 
 export type BackendMessage =
   | { type: "settings"; settings: Settings }
-  | { type: "plan_result"; requestId: string; cues: PlannedCue[] }
+  /** `content` is set when the backend read the reply itself (plan_last). */
+  | { type: "plan_result"; requestId: string; cues: PlannedCue[]; content?: string }
   | { type: "plan_error"; requestId: string; error: string }
   | { type: "connections"; connections: ConnectionSummary[] };
 
@@ -43,6 +45,12 @@ export function parseFrontendMessage(raw: unknown): FrontendMessage | null {
       return { type: raw.type };
     case "save_settings":
       return { type: "save_settings", settings: raw.settings };
+    case "plan_last": {
+      const requestId = text(raw.requestId, 64);
+      const chatId = text(raw.chatId, 128);
+      if (!requestId || !chatId) return null;
+      return { type: "plan_last", requestId, chatId, characterId: text(raw.characterId, 128), status: text(raw.status, 1000) ?? "" };
+    }
     case "plan_cancel": {
       const requestId = text(raw.requestId, 64);
       return requestId ? { type: "plan_cancel", requestId } : null;

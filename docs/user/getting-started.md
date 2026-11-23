@@ -24,8 +24,12 @@ Each chat has a mode, chosen at the top of the **Play** tab. Turn on **Use for e
 - **Reactive** – your rules on the **Rules** tab decide: for example, "when the character's reply mentions *kiss*, play a slow wave at 40". **Stream pulse** makes toys pulse while a reply is being written.
 - **Story** – after each reply, a separate model call reads it and plans cues that play as you read. Your messages stay clean. Pick the planner's connection in **Settings**; each reply is sent to that provider, so use the one you already roleplay with or a local model. The cue list on **Play** shows each cue next to its sentence and highlights the one playing now. Press ▶ on any cue to play the reply again from there, for example after STOP or when you go back and re-read. That also lifts a pause.
 
+  A new chat's greeting, or a chat you open later, has no cues yet: press **Plan last reply**. **Re-plan** asks for a fresh take on the current reply. This needs the *chats* and *chat_mutation* permissions in the Extensions panel; Toymate only reads the last messages.
+
+  Short replies still play for a while: each reply lasts its reading time, but never less than **Shortest playback** (30 s by default) or more than **Longest playback**. In **Settings** you choose these and whether the last scene keeps going or fades out when the cues run out.
+
 Only new replies move your toys. Opening an old chat, scrolling, or flipping through earlier swipes never replays anything on its own.
 
 ## Zones
 
-Group your toys' outputs into zones (for example `clit, internal, stroker`) on the **Devices** tab. Rules and Story mode address zones, never device names. Use **Play by hand** to play a feel (steady, pulse, wave, tease, build, throb, random) at a tempo and level on a zone, or add a short accent (spike, pause, flutter). The **More / Less / Hold / Stop** reactions change the scene right away, and in Story mode the next plan takes them into account.
+Group your toys' outputs into zones (for example `clit, internal, stroker`) on the **Devices** tab. Rules and Story mode address zones, never device names. Use **Play by hand** to play a feel (steady, pulse, wave, tease, build, throb, random) at a tempo and level on a zone, or add a short accent (spike, pause, flutter). Choose **Ramp** to rise or fall gradually, add **Variation** for an unpredictable wander around the level, and set **Lasts** to make a change temporary. Rules and the Story planner can use ramps, variation, and durations too. The **More / Less / Hold / Stop** reactions change the scene right away, and in Story mode the next plan takes them into account.

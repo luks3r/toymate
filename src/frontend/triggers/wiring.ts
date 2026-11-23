@@ -1,15 +1,17 @@
 import { ALL_ZONES, clampLevel, describeIntent, isRecord } from "../../shared/intent";
-import { cueOffsetsMs, splitSentences, type PlannedCue } from "../../shared/plan";
+import { cueOffsetsMs, playbackMs, splitSentences, type PlannedCue } from "../../shared/plan";
 import { matchRules } from "../../shared/rules";
 import { matchSafeword } from "../../shared/safewords";
 import { modeFor, withChatMode, type Mode, type Settings } from "../../shared/settings";
 import type { FrontendMessage } from "../../shared/wire";
 import type { Engine, Reaction } from "../engine/engine";
-import { GenerationTracker, type LiveGeneration } from "./generations";
+import { GenerationTracker } from "./generations";
 
 interface PendingPlan {
-  generation: LiveGeneration;
-  content: string;
+  /** When reading began; null for a plan the user asked for, which plays from its arrival. */
+  readingStart: number | null;
+  /** Null when the backend reads the reply (plan_last). */
+  content: string | null;
 }
 
 export interface TriggerHost {
@@ -31,6 +33,8 @@ interface LastPlan {
   id: string;
   cues: readonly PlannedCue[];
   offsets: number[];
+  /** Playback length of the whole reply. */
+  endMs: number;
   sentences: string[];
 }
 
@@ -144,7 +148,7 @@ export class Triggers {
       for (const intent of matchRules(this.host.settings().rules, { when: "character_message", text: content, characterId: g.characterId }))
         this.engine.apply(intent, "auto");
     } else if (mode === "story" && content.trim()) {
-      this.plans.set(g.id, { generation: g, content });
+      this.plans.set(g.id, { readingStart: g.firstTokenAt ?? g.startedAt, content });
       this.host.send({
         type: "plan_request",
         requestId: g.id,
@@ -204,30 +208,57 @@ export class Triggers {
     void this.engine.stopEverything({ pause: false });
   }
 
+  /**
+   * User asked to plan the chat's last reply (a new chat's greeting, a chat
+   * opened later, or a fresh take on the current reply). Explicit, so it lifts a pause.
+   */
+  requestLastPlan() {
+    const { chatId, characterId } = this.host.activeChat();
+    if (!chatId) return;
+    for (const id of [...this.plans.keys()]) this.dropPlan(id);
+    if (this.engine.view().paused) this.engine.resume();
+    const requestId = `last-${this.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.plans.set(requestId, { readingStart: null, content: null });
+    this.host.send({ type: "plan_last", requestId, chatId, characterId, status: this.statusLine(true) });
+    this.setPlan({ state: "planning", detail: "Planning cues for the last reply…", cues: [] });
+  }
+
   /** Backend answered a plan request. Stale answers are dropped. */
-  onPlanResult(requestId: string, cues: readonly PlannedCue[]) {
+  onPlanResult(requestId: string, cues: readonly PlannedCue[], content?: string) {
     const pending = this.plans.get(requestId);
     if (!pending) return;
     this.plans.delete(requestId);
-    const settings = this.host.settings();
-    const sentences = splitSentences(pending.content);
+    const text = pending.content ?? content ?? "";
+    const pace = this.host.settings().story;
+    const sentences = splitSentences(text);
+    const offsets = cueOffsetsMs(sentences, cues, text.length, pace);
+    const endMs = playbackMs(text.length, pace);
     const plan: LastPlan = {
       id: requestId,
-      cues,
-      offsets: cueOffsetsMs(sentences, cues, settings.story.readingCps),
+      // A ramp without its own length lasts until the next cue (or the end of the reply).
+      cues: cues.map((cue, i) =>
+        cue.intent.kind === "scene" && cue.intent.to !== undefined && cue.intent.overSec === undefined
+          ? { ...cue, intent: { ...cue.intent, overSec: Math.max(1, Math.round(((offsets[i + 1] ?? endMs) - offsets[i]!) / 1000)) } }
+          : cue,
+      ),
+      offsets,
+      endMs,
       sentences: cues.map((cue) => sentences[cue.sentence - 1]?.text.slice(0, 80) ?? ""),
     };
     this.lastPlan = plan;
-    const readingStart = pending.generation.firstTokenAt ?? pending.generation.startedAt;
-    // A late plan starts at the cue the reader has already reached; earlier ones are skipped.
     const now = this.now();
+    const readingStart = pending.readingStart ?? now;
+    // A late plan starts at the cue the reader has already reached; earlier ones are skipped.
     const reached = plan.offsets.findLastIndex((o) => readingStart + o <= now);
     this.play(plan, Math.max(0, reached), readingStart);
-    const detail = cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} for the latest reply.` : "The planner chose no cues for this reply.";
+    const secs = Math.round(endMs / 1000);
+    const detail = cues.length
+      ? `${cues.length} cue${cues.length === 1 ? "" : "s"} over about ${secs} s.`
+      : "The planner chose no cues for this reply.";
     this.setPlan({ ...this.plan, detail });
   }
 
-  /** User picked a cue: play the latest plan again from there, at reading pace. Lifts a pause. */
+  /** User picked a cue: play the latest plan again from there. Lifts a pause. */
   resumeFrom(index: number) {
     const plan = this.lastPlan;
     if (!plan || index < 0 || index >= plan.cues.length) return;
@@ -236,14 +267,18 @@ export class Triggers {
     this.setPlan({ ...this.plan, detail: `Resumed from cue ${index + 1} of ${plan.cues.length}.` });
   }
 
+  hasLastPlan() {
+    return this.lastPlan !== null;
+  }
+
   private play(plan: LastPlan, from: number, readingStart: number) {
     const now = this.now();
     const at = plan.offsets.map((o, i) => (i < from ? null : Math.max(now, readingStart + o)));
+    const scheduled = plan.cues.flatMap((cue, i) => (at[i] === null ? [] : [{ at: at[i]!, intent: cue.intent }]));
+    if (this.host.settings().story.afterReply === "fade")
+      scheduled.push({ at: Math.max(now, readingStart + plan.endMs), intent: { kind: "scene", zone: ALL_ZONES, to: 0, overSec: 6 } });
     this.engine.cancel(plan.id);
-    this.engine.schedule(
-      plan.id,
-      plan.cues.flatMap((cue, i) => (at[i] === null ? [] : [{ at: at[i]!, intent: cue.intent }])),
-    );
+    this.engine.schedule(plan.id, scheduled);
     this.setPlan({
       state: "planned",
       detail: this.plan.detail,
