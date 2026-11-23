@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { cueOffsetsMs, parsePlan, splitSentences } from "./plan";
 import { matchRules } from "./rules";
 import { matchSafeword } from "./safewords";
-import { DEFAULT_SETTINGS, modeFor, parseSettings, type Rule } from "./settings";
+import { DEFAULT_SETTINGS, modeFor, parseSettings, withChatMode, type Rule } from "./settings";
 import { parseFrontendMessage } from "./wire";
 
 describe("matchSafeword", () => {
@@ -122,11 +122,20 @@ describe("settings", () => {
     expect(s.rules).toHaveLength(1);
   });
 
-  it("chat mode wins over character default", () => {
-    const s = parseSettings({ chatModes: { c: "story", d: "bogus" }, characterModes: { ch: "reactive" } });
+  it("chat mode wins over character default, including off", () => {
+    const s = parseSettings({ chatModes: { c: "story", d: "bogus", o: "off" }, characterModes: { ch: "reactive", x: "off" } });
     expect(modeFor(s, "c", "ch")).toBe("story");
     expect(modeFor(s, "d", "ch")).toBe("reactive");
+    expect(modeFor(s, "o", "ch")).toBe("off");
     expect(modeFor(s, "e", null)).toBe("off");
+    expect(s.characterModes).toEqual({ ch: "reactive" });
+  });
+
+  it("withChatMode stores only overrides of the character default", () => {
+    const s = parseSettings({ characterModes: { ch: "story" } });
+    expect(withChatMode(s, "c", "ch", "off").chatModes).toEqual({ c: "off" });
+    expect(withChatMode(withChatMode(s, "c", "ch", "off"), "c", "ch", "story").chatModes).toEqual({});
+    expect(withChatMode(s, "c", null, "off").chatModes).toEqual({});
   });
 });
 

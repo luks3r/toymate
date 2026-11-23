@@ -2,7 +2,7 @@ import { ALL_ZONES, clampLevel, describeIntent, isRecord } from "../../shared/in
 import { cueOffsetsMs, splitSentences, type PlannedCue } from "../../shared/plan";
 import { matchRules } from "../../shared/rules";
 import { matchSafeword } from "../../shared/safewords";
-import { modeFor, type Mode, type Settings } from "../../shared/settings";
+import { modeFor, withChatMode, type Mode, type Settings } from "../../shared/settings";
 import type { FrontendMessage } from "../../shared/wire";
 import type { Engine, Reaction } from "../engine/engine";
 import { GenerationTracker, type LiveGeneration } from "./generations";
@@ -176,11 +176,9 @@ export class Triggers {
     if (hit === "stop") {
       void this.engine.stopEverything({ pause: true });
       for (const id of [...this.plans.keys()]) this.dropPlan(id);
-      if (chatId && settings.chatModes[chatId] === "story") {
-        const chatModes = { ...settings.chatModes };
-        delete chatModes[chatId];
-        this.host.saveSettings({ ...settings, chatModes });
-      }
+      const characterId = this.host.activeChat().characterId;
+      if (chatId && modeFor(settings, chatId, characterId) === "story")
+        this.host.saveSettings(withChatMode(settings, chatId, characterId, "off"));
       this.lastPlan = null;
       this.setPlan({ state: "idle", detail: "Safeword: everything stopped.", cues: [] });
       return;

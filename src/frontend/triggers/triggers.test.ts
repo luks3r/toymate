@@ -213,6 +213,12 @@ describe("safewords", () => {
     expect(t.settings().chatModes.story).toBeUndefined();
   });
 
+  it("stop leaves Story mode even when it comes from the character default", () => {
+    const t = setup({ chatModes: {}, characterModes: { c1: "story" } });
+    t.emit("MESSAGE_SENT", { chatId: "story", message: { is_user: true, content: "red" } });
+    expect(t.settings().chatModes.story).toBe("off");
+  });
+
   it("ease halves the scene; in-story words do nothing", () => {
     const t = setup();
     t.engine.apply({ kind: "scene", zone: "all", level: 60 }, "manual");

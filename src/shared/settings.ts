@@ -139,10 +139,11 @@ function parseRule(raw: unknown, zones: string[]): Rule | null {
   };
 }
 
-function parseModes(raw: unknown): Record<string, Mode> {
+/** Chat modes keep "off" so a chat can opt out of its character's default. */
+function parseModes(raw: unknown, keepOff: boolean): Record<string, Mode> {
   const out: Record<string, Mode> = {};
   if (!isRecord(raw)) return out;
-  for (const [id, mode] of Object.entries(raw)) if (isMode(mode) && mode !== "off") out[id] = mode;
+  for (const [id, mode] of Object.entries(raw)) if (isMode(mode) && (keepOff || mode !== "off")) out[id] = mode;
   return out;
 }
 
@@ -189,14 +190,23 @@ export function parseSettings(raw: unknown): Settings {
       readingCps: num(story.readingCps, d.story.readingCps, 3, 100),
       awareness: bool(story.awareness, d.story.awareness),
     },
-    chatModes: parseModes(r.chatModes),
-    characterModes: parseModes(r.characterModes),
+    chatModes: parseModes(r.chatModes, true),
+    characterModes: parseModes(r.characterModes, false),
   };
 }
 
 /** A chat's own mode wins; otherwise the character's default applies. */
 export function modeFor(settings: Settings, chatId: string | null, characterId: string | null): Mode {
-  return (chatId && settings.chatModes[chatId]) || (characterId && settings.characterModes[characterId]) || "off";
+  return (chatId ? settings.chatModes[chatId] : undefined) ?? (characterId ? settings.characterModes[characterId] : undefined) ?? "off";
+}
+
+/** Sets a chat's mode, storing nothing when it matches what the character default would give. */
+export function withChatMode(settings: Settings, chatId: string, characterId: string | null, mode: Mode): Settings {
+  const chatModes = { ...settings.chatModes };
+  const inherited = (characterId ? settings.characterModes[characterId] : undefined) ?? "off";
+  if (mode === inherited) delete chatModes[chatId];
+  else chatModes[chatId] = mode;
+  return { ...settings, chatModes };
 }
 
 export function prefsFor(settings: Settings, key: string): OutputPrefs {
