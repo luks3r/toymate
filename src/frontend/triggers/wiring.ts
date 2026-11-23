@@ -23,7 +23,15 @@ export interface TriggerHost {
 export interface PlanView {
   state: "idle" | "planning" | "planned" | "failed";
   detail: string;
-  cues: { atMs: number; label: string; sentence: string }[];
+  /** `atMs` is null for cues skipped because playback started after them. */
+  cues: { atMs: number | null; label: string; sentence: string }[];
+}
+
+interface LastPlan {
+  id: string;
+  cues: readonly PlannedCue[];
+  offsets: number[];
+  sentences: string[];
 }
 
 const STREAM_PULSE_MS = 500;
@@ -44,6 +52,8 @@ export class Triggers {
   private disposers: (() => void)[] = [];
   private planListeners = new Set<() => void>();
   plan: PlanView = { state: "idle", detail: "", cues: [] };
+  /** The latest reply's plan, kept so the user can resume from any cue. */
+  private lastPlan: LastPlan | null = null;
 
   constructor(
     private host: TriggerHost,
@@ -171,6 +181,7 @@ export class Triggers {
         delete chatModes[chatId];
         this.host.saveSettings({ ...settings, chatModes });
       }
+      this.lastPlan = null;
       this.setPlan({ state: "idle", detail: "Safeword: everything stopped.", cues: [] });
       return;
     }
@@ -190,6 +201,7 @@ export class Triggers {
     for (const id of this.tracker.clear()) this.dropPlan(id);
     for (const id of [...this.plans.keys()]) this.dropPlan(id);
     this.previousUserMessage = "";
+    this.lastPlan = null;
     this.setPlan({ state: "idle", detail: "", cues: [] });
     void this.engine.stopEverything({ pause: false });
   }
@@ -199,21 +211,45 @@ export class Triggers {
     const pending = this.plans.get(requestId);
     if (!pending) return;
     this.plans.delete(requestId);
-    const now = this.now();
     const settings = this.host.settings();
     const sentences = splitSentences(pending.content);
-    const offsets = cueOffsetsMs(sentences, cues, settings.story.readingCps);
+    const plan: LastPlan = {
+      id: requestId,
+      cues,
+      offsets: cueOffsetsMs(sentences, cues, settings.story.readingCps),
+      sentences: cues.map((cue) => sentences[cue.sentence - 1]?.text.slice(0, 80) ?? ""),
+    };
+    this.lastPlan = plan;
     const readingStart = pending.generation.firstTokenAt ?? pending.generation.startedAt;
-    const scheduled = cues.map((cue, i) => ({ at: Math.max(now, readingStart + offsets[i]!), intent: cue.intent }));
-    this.engine.schedule(requestId, scheduled);
+    // A late plan starts at the cue the reader has already reached; earlier ones are skipped.
+    const now = this.now();
+    const reached = plan.offsets.findLastIndex((o) => readingStart + o <= now);
+    this.play(plan, Math.max(0, reached), readingStart);
+    const detail = cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} for the latest reply.` : "The planner chose no cues for this reply.";
+    this.setPlan({ ...this.plan, detail });
+  }
+
+  /** User picked a cue: play the latest plan again from there, at reading pace. Lifts a pause. */
+  resumeFrom(index: number) {
+    const plan = this.lastPlan;
+    if (!plan || index < 0 || index >= plan.cues.length) return;
+    if (this.engine.view().paused) this.engine.resume();
+    this.play(plan, index, this.now() - plan.offsets[index]!);
+    this.setPlan({ ...this.plan, detail: `Resumed from cue ${index + 1} of ${plan.cues.length}.` });
+  }
+
+  private play(plan: LastPlan, from: number, readingStart: number) {
+    const now = this.now();
+    const at = plan.offsets.map((o, i) => (i < from ? null : Math.max(now, readingStart + o)));
+    this.engine.cancel(plan.id);
+    this.engine.schedule(
+      plan.id,
+      plan.cues.flatMap((cue, i) => (at[i] === null ? [] : [{ at: at[i]!, intent: cue.intent }])),
+    );
     this.setPlan({
       state: "planned",
-      detail: cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} for the latest reply.` : "The planner chose no cues for this reply.",
-      cues: cues.map((cue, i) => ({
-        atMs: scheduled[i]!.at,
-        label: describeIntent(cue.intent),
-        sentence: sentences[cue.sentence - 1]?.text.slice(0, 80) ?? "",
-      })),
+      detail: this.plan.detail,
+      cues: plan.cues.map((cue, i) => ({ atMs: at[i] ?? null, label: describeIntent(cue.intent), sentence: plan.sentences[i]! })),
     });
   }
 

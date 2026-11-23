@@ -22,9 +22,9 @@ Each chat has a mode, shown at the top of the Toymate tab. You can also set a de
 
 - **Off** – nothing happens automatically. You can still play scenes by hand from **Live**.
 - **Reactive** – your **Reactive rules** decide: for example, "when the character's reply mentions *kiss*, play a slow wave at 40". **Stream pulse** makes toys pulse while a reply is being written.
-- **Story** – after each reply, a separate model call reads it and plans cues that play as you read. Your messages stay clean. Pick the planner's connection in **Story mode**; each reply is sent to that provider, so use the one you already roleplay with or a local model.
+- **Story** – after each reply, a separate model call reads it and plans cues that play as you read. Your messages stay clean. Pick the planner's connection in **Story mode**; each reply is sent to that provider, so use the one you already roleplay with or a local model. The cue list under **Live** shows each cue next to its sentence. Press ▶ on any cue to play the reply again from there, for example after STOP ALL or when you go back and re-read. That also lifts a pause.
 
-Only new replies move your toys. Opening an old chat, scrolling, or flipping through earlier swipes never replays anything.
+Only new replies move your toys. Opening an old chat, scrolling, or flipping through earlier swipes never replays anything on its own.
 
 ## Zones
 

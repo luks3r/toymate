@@ -8,7 +8,7 @@ Design reasons are in [06_interaction.md](internals/06_interaction.md) and [01_a
 - **Connection and manual control:** adapter, device model, governor (calibration, max level, ramp, timing gap, dedupe, constrict hold, rotation swaps, stroke speed and range), sidebar tab, Stop all (button, Shift+Esc, Extras action), every stop path.
 - **Scenes:** director (glide, accents, hold timeout, lock), renderers for vibrate, rotate, oscillate, constrict/inflate, HwPositionWithDuration, temperature; zones; calibration UI.
 - **Reactive mode:** live generation tracker with filters, rules (character reply, user message, while streaming), stream pulse, safewords.
-- **Story mode:** planner call with `plan_cues` tool and JSON fallback, reading-paced scheduling, stale-plan dropping, optional character awareness note, Story section.
+- **Story mode:** planner call with `plan_cues` tool and JSON fallback, reading-paced scheduling, late plans start at the cue the reader reached, resume from any cue of the latest plan, stale-plan dropping, optional character awareness note, Story section.
 
 Verified: unit tests (`bun run check`); engine against Intiface's simulated vibrator; full flow in an isolated Lumiverse with a local Ollama model (reply → plan → cues → device, Stop all, Shift+Esc, generation stop, safeword).
 
@@ -18,7 +18,6 @@ Verified: unit tests (`bun run check`); engine against Intiface's simulated vibr
 - **More device shapes:** integration pass with simulated two-motor vibrator, rotator, oscillator, stroker, and air pump. Renderers for these are unit-tested only.
 - **Lumiverse Desktop on macOS:** confirm WKWebView allows `ws://127.0.0.1` from the app page.
 - **Planner quality:** small models over-cue (13 cues for one reply in testing). Tune the prompt on two or more models, consider merging consecutive identical cues, and measure latency; plan the first paragraph while the rest streams if late plans are common.
-- **Late plans:** when a plan arrives after its cue times, past cues collapse into the latest one. Show this honestly in the plan view ("skipped") rather than "played".
 
 ## Later (not scheduled)
 

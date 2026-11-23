@@ -2821,6 +2821,7 @@ class Triggers {
   disposers = [];
   planListeners = new Set;
   plan = { state: "idle", detail: "", cues: [] };
+  lastPlan = null;
   constructor(host, engine, now = () => Date.now()) {
     this.host = host;
     this.engine = engine;
@@ -2948,6 +2949,7 @@ class Triggers {
         delete chatModes[chatId];
         this.host.saveSettings({ ...settings, chatModes });
       }
+      this.lastPlan = null;
       this.setPlan({ state: "idle", detail: "Safeword: everything stopped.", cues: [] });
       return;
     }
@@ -2968,6 +2970,7 @@ class Triggers {
     for (const id of [...this.plans.keys()])
       this.dropPlan(id);
     this.previousUserMessage = "";
+    this.lastPlan = null;
     this.setPlan({ state: "idle", detail: "", cues: [] });
     this.engine.stopEverything({ pause: false });
   }
@@ -2976,21 +2979,40 @@ class Triggers {
     if (!pending)
       return;
     this.plans.delete(requestId);
-    const now = this.now();
     const settings = this.host.settings();
     const sentences = splitSentences(pending.content);
-    const offsets = cueOffsetsMs(sentences, cues, settings.story.readingCps);
+    const plan = {
+      id: requestId,
+      cues,
+      offsets: cueOffsetsMs(sentences, cues, settings.story.readingCps),
+      sentences: cues.map((cue) => sentences[cue.sentence - 1]?.text.slice(0, 80) ?? "")
+    };
+    this.lastPlan = plan;
     const readingStart = pending.generation.firstTokenAt ?? pending.generation.startedAt;
-    const scheduled = cues.map((cue, i) => ({ at: Math.max(now, readingStart + offsets[i]), intent: cue.intent }));
-    this.engine.schedule(requestId, scheduled);
+    const now = this.now();
+    const reached = plan.offsets.findLastIndex((o) => readingStart + o <= now);
+    this.play(plan, Math.max(0, reached), readingStart);
+    const detail = cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} for the latest reply.` : "The planner chose no cues for this reply.";
+    this.setPlan({ ...this.plan, detail });
+  }
+  resumeFrom(index) {
+    const plan = this.lastPlan;
+    if (!plan || index < 0 || index >= plan.cues.length)
+      return;
+    if (this.engine.view().paused)
+      this.engine.resume();
+    this.play(plan, index, this.now() - plan.offsets[index]);
+    this.setPlan({ ...this.plan, detail: `Resumed from cue ${index + 1} of ${plan.cues.length}.` });
+  }
+  play(plan, from, readingStart) {
+    const now = this.now();
+    const at = plan.offsets.map((o, i) => i < from ? null : Math.max(now, readingStart + o));
+    this.engine.cancel(plan.id);
+    this.engine.schedule(plan.id, plan.cues.flatMap((cue, i) => at[i] === null ? [] : [{ at: at[i], intent: cue.intent }]));
     this.setPlan({
       state: "planned",
-      detail: cues.length ? `${cues.length} cue${cues.length === 1 ? "" : "s"} for the latest reply.` : "The planner chose no cues for this reply.",
-      cues: cues.map((cue, i) => ({
-        atMs: scheduled[i].at,
-        label: describeIntent(cue.intent),
-        sentence: sentences[cue.sentence - 1]?.text.slice(0, 80) ?? ""
-      }))
+      detail: this.plan.detail,
+      cues: plan.cues.map((cue, i) => ({ atMs: at[i] ?? null, label: describeIntent(cue.intent), sentence: plan.sentences[i] }))
     });
   }
   onPlanError(requestId, error) {
@@ -3171,14 +3193,27 @@ function mountPanel(root, deps) {
     const send = (intent) => engine.apply(intent, "manual");
     manual.replaceChildren(h("div", { class: "tm-card" }, h("div", { class: "tm-row" }, select(draft.zone, [ALL_ZONES, ...s.zones], (z) => draft.zone = z, "Zone"), select(draft.feel, FEELS, (f) => draft.feel = f, "Feel"), select(draft.tempo, TEMPOS, (t) => draft.tempo = t, "Tempo")), slider("Level", draft.level, 0, 100, 1, (v) => draft.level = v), h("div", { class: "tm-row" }, button("Play", () => send({ kind: "scene", zone: draft.zone, level: draft.level, feel: draft.feel, tempo: draft.tempo }), "tm-primary"), ...ACCENTS.map((a) => button(a, () => send({ kind: "accent", zone: draft.zone, accent: a }), "tm-small")), button("Stop zone", () => send({ kind: "stop", zone: draft.zone }), "tm-small")), h("div", { class: "tm-hint" }, `Levels are capped at ${s.limits.maxLevel} and mapped onto each output's calibration. Scenes fade after ${Math.round(s.limits.holdTimeoutSec)} s without activity.`)));
   }
+  let cueStatus = [];
   function renderPlan() {
     const p = triggers.plan;
+    cueStatus = [];
     if (p.state === "idle" && !p.detail) {
       planBox.replaceChildren();
       return;
     }
+    const items = p.cues.map((c, i) => {
+      const el = h("span", { class: "tm-dim" });
+      cueStatus.push({ el, atMs: c.atMs });
+      return h("li", {}, button("▶", () => triggers.resumeFrom(i), "tm-small tm-resume", "Resume from this cue"), " ", h("b", {}, c.label), " ", el, h("span", { class: "tm-dim" }, ` · “${c.sentence}”`));
+    });
+    planBox.replaceChildren(h("div", { class: "tm-card" }, h("div", { class: p.state === "failed" ? "tm-error" : "tm-dim" }, p.detail), items.length ? h("ol", { class: "tm-cues" }, ...items) : null, items.length ? h("div", { class: "tm-hint" }, "▶ plays the reply's cues again from that point, at your reading speed. It also lifts a pause.") : null));
+    updateCueStatus();
+  }
+  function updateCueStatus() {
     const now = Date.now();
-    planBox.replaceChildren(h("div", { class: "tm-card" }, h("div", { class: p.state === "failed" ? "tm-error" : "tm-dim" }, p.detail), p.cues.length ? h("ol", { class: "tm-cues" }, ...p.cues.map((c) => h("li", {}, h("b", {}, c.label), " ", h("span", { class: "tm-dim" }, `${c.atMs > now ? `in ${Math.ceil((c.atMs - now) / 1000)} s` : "played"} · “${c.sentence}”`)))) : null));
+    const scheduled = engine.view().pendingCues > 0;
+    for (const { el, atMs } of cueStatus)
+      el.textContent = atMs === null ? "skipped" : atMs <= now ? "played" : scheduled ? `in ${Math.ceil((atMs - now) / 1000)} s` : "stopped";
   }
   let deviceSig = "";
   const valueRefs = new Map;
@@ -3259,7 +3294,7 @@ function mountPanel(root, deps) {
     renderDevices();
   });
   const unsubPlan = triggers.onPlanChange(renderPlan);
-  const planTimer = setInterval(() => triggers.plan.cues.length && renderPlan(), 1000);
+  const planTimer = setInterval(updateCueStatus, 1000);
   return {
     settingsChanged: renderSettings,
     chatChanged: renderMode,
@@ -3311,6 +3346,7 @@ var PANEL_CSS = `
 .tm-meter > b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--lumiverse-text-dim); }
 .tm-zone { display: grid; grid-template-columns: 6em 1fr auto auto; align-items: center; gap: 8px; }
 .tm-cues { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 3px; }
+.tm-resume { padding: 0 6px; margin-right: 2px; }
 .tm-rule { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 6px; border: 1px solid var(--lumiverse-border-light, var(--lumiverse-border)); }
 `;
 

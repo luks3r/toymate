@@ -108,6 +108,54 @@ describe("Story mode plans", () => {
     expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([1500, 2100]);
   });
 
+  it("starts a late plan at the cue the reader reached and skips earlier ones", () => {
+    const t = setup();
+    t.reply("g1", "Aaaa aaaa. Bbbbb. Ccc.");
+    t.setNow(2500);
+    t.triggers.onPlanResult("g1", [
+      { sentence: 1, intent: { kind: "scene", zone: "all", level: 30 } },
+      { sentence: 2, intent: { kind: "scene", zone: "all", level: 60 } },
+      { sentence: 3, intent: { kind: "scene", zone: "all", level: 20 } },
+    ]);
+    // sentences start at 0, 1100, 1800 ms after reading began at 1000
+    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([null, 2500, 2800]);
+    expect(t.engine.view().pendingCues).toBe(2);
+  });
+
+  it("resumes from a chosen cue at reading pace and lifts a pause", async () => {
+    const t = setup();
+    t.reply("g1", "Aaaa aaaa. Bbbbb. Ccc.");
+    t.triggers.onPlanResult("g1", [
+      { sentence: 1, intent: { kind: "scene", zone: "all", level: 30 } },
+      { sentence: 2, intent: { kind: "scene", zone: "all", level: 60 } },
+      { sentence: 3, intent: { kind: "scene", zone: "all", level: 20 } },
+    ]);
+    await t.engine.panic();
+    expect(t.engine.view().pendingCues).toBe(0);
+    t.setNow(10_000);
+    t.triggers.resumeFrom(1);
+    expect(t.engine.view().paused).toBe(false);
+    expect(t.triggers.plan.cues.map((c) => c.atMs)).toEqual([null, 10_000, 10_700]);
+    expect(t.engine.view().pendingCues).toBe(2);
+    t.triggers.resumeFrom(0);
+    expect(t.engine.view().pendingCues).toBe(3);
+  });
+
+  it("has nothing to resume after a chat switch or a safeword", () => {
+    const t = setup();
+    t.reply("g1", "One.");
+    t.triggers.onPlanResult("g1", [{ sentence: 1, intent: { kind: "scene", zone: "all", level: 30 } }]);
+    t.emit("CHAT_SWITCHED", { chatId: "story" });
+    t.triggers.resumeFrom(0);
+    expect(t.engine.view().pendingCues).toBe(0);
+
+    t.reply("g2", "Two.");
+    t.triggers.onPlanResult("g2", [{ sentence: 1, intent: { kind: "scene", zone: "all", level: 30 } }]);
+    t.emit("MESSAGE_SENT", { chatId: "story", message: { is_user: true, content: "(red)" } });
+    t.triggers.resumeFrom(0);
+    expect(t.engine.view().paused).toBe(true);
+  });
+
   it("drops plans for superseded or stopped replies", () => {
     const t = setup();
     t.reply("g1", "First.");

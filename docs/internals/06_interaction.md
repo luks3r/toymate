@@ -90,6 +90,8 @@ start = max(plan arrival, generation start + characters before the sentence ÷ r
 
 Reading speed is a user setting (default about 15 characters per second), and can later follow TTS playback when TTS is on. A cue lasts until the next cue starts; the last cue holds the scene until the next reply or the hold timeout.
 
+**Late plans and resuming.** A plan that arrives after the reader passed some cues starts at the latest cue already reached; earlier cues are marked skipped. The latest plan stays available until the next plan, a chat switch, or a safeword: picking any cue replays the plan from that cue at reading pace. This is an explicit user action, so it also lifts a pause; it never happens on its own.
+
 **Latency.** The call starts when the reply ends, so the first cue is late by the planner's latency. Reading time hides most of it: the first sentences take several seconds to read, and a fast model answers in one to three. If that is not enough, a later option plans the first paragraph while the rest still streams.
 
 **Superseded and stopped replies.** A new generation, a swipe, or a stop aborts the in-flight planner call (`AbortSignal`) and drops its pending cues. A plan that arrives for a reply that is no longer the latest live one is discarded.

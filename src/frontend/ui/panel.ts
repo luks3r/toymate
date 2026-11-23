@@ -186,23 +186,46 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
     );
   }
 
+  // Built when the plan changes; the timer only rewrites status text, so resume buttons never move under a click.
+  let cueStatus: { el: HTMLElement; atMs: number | null }[] = [];
   function renderPlan() {
     const p = triggers.plan;
+    cueStatus = [];
     if (p.state === "idle" && !p.detail) {
       planBox.replaceChildren();
       return;
     }
-    const now = Date.now();
+    const items = p.cues.map((c, i) => {
+      const el = h("span", { class: "tm-dim" });
+      cueStatus.push({ el, atMs: c.atMs });
+      return h(
+        "li",
+        {},
+        button("▶", () => triggers.resumeFrom(i), "tm-small tm-resume", "Resume from this cue"),
+        " ",
+        h("b", {}, c.label),
+        " ",
+        el,
+        h("span", { class: "tm-dim" }, ` · “${c.sentence}”`),
+      );
+    });
     planBox.replaceChildren(
       h(
         "div",
         { class: "tm-card" },
         h("div", { class: p.state === "failed" ? "tm-error" : "tm-dim" }, p.detail),
-        p.cues.length
-          ? h("ol", { class: "tm-cues" }, ...p.cues.map((c) => h("li", {}, h("b", {}, c.label), " ", h("span", { class: "tm-dim" }, `${c.atMs > now ? `in ${Math.ceil((c.atMs - now) / 1000)} s` : "played"} · “${c.sentence}”`))))
-          : null,
+        items.length ? h("ol", { class: "tm-cues" }, ...items) : null,
+        items.length ? h("div", { class: "tm-hint" }, "▶ plays the reply's cues again from that point, at your reading speed. It also lifts a pause.") : null,
       ),
     );
+    updateCueStatus();
+  }
+
+  function updateCueStatus() {
+    const now = Date.now();
+    const scheduled = engine.view().pendingCues > 0;
+    for (const { el, atMs } of cueStatus)
+      el.textContent = atMs === null ? "skipped" : atMs <= now ? "played" : scheduled ? `in ${Math.ceil((atMs - now) / 1000)} s` : "stopped";
   }
 
   // ── devices ──
@@ -392,7 +415,7 @@ export function mountPanel(root: HTMLElement, deps: PanelDeps) {
     renderDevices();
   });
   const unsubPlan = triggers.onPlanChange(renderPlan);
-  const planTimer = setInterval(() => triggers.plan.cues.length && renderPlan(), 1000);
+  const planTimer = setInterval(updateCueStatus, 1000);
 
   return {
     /** Settings changed (from the backend or locally). */

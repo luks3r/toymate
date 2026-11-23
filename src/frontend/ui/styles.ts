@@ -36,5 +36,6 @@ export const PANEL_CSS = `
 .tm-meter > b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--lumiverse-text-dim); }
 .tm-zone { display: grid; grid-template-columns: 6em 1fr auto auto; align-items: center; gap: 8px; }
 .tm-cues { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 3px; }
+.tm-resume { padding: 0 6px; margin-right: 2px; }
 .tm-rule { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 6px; border: 1px solid var(--lumiverse-border-light, var(--lumiverse-border)); }
 `;
