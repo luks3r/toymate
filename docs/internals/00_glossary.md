@@ -1,0 +1,23 @@
+# Glossary
+
+- **Intiface** – Intiface Central (GUI) or Intiface Engine (CLI). The Buttplug server that talks to hardware over Bluetooth, USB, or serial. Runs on the user's machine and listens on a WebSocket (`ws://127.0.0.1:12345` by default).
+- **Device** – one physical toy reported by Intiface. Has a stable index for the lifetime of a connection, not across connections.
+- **Feature** – one controllable part of a device, such as one motor. A device has one or more features. Each feature has one or more outputs and may have inputs (battery, pressure).
+- **Output** – an actuator kind on a feature: vibrate, rotate, oscillate, constrict, inflate, position, temperature, and others the protocol defines. Each output has its own value range; Toymate works in levels `0–100` and converts at the governor.
+- **Zone** – a user-assigned label for a group of outputs ("clit", "stroker"), used by rules and cues instead of device names. `all` means every output except temperature, spray, and LED.
+- **Intent** – what a source asks for: level, feel, tempo, zone, accent, or stop. See [06_interaction.md](06_interaction.md).
+- **Scene** – the director's running state per zone (level, feel, tempo). Keeps running between messages until changed or the hold timeout fades it.
+- **Accent** – a short overlay on a scene (spike, pause, flutter).
+- **Planner call** – in Story mode, a separate LLM call after a live reply ends that reads the reply and returns a cue sheet through a `plan_cues` tool call.
+- **Cue** – one entry of a cue sheet: an intent anchored to a sentence of the reply, scheduled at the estimated reading position.
+- **Source** – anything that changes scenes: manual controls, rules, cues, reactions.
+- **Director** – the engine part that owns scenes, accents, cue schedules, and the hold timeout.
+- **Renderer** – turns a scene into a value per output on each tick, specific to the output type.
+- **Calibration** – per-output floor (lowest the user feels) and ceiling (strongest wanted) that levels map onto.
+- **Governor** – the single choke point between renderers and the Buttplug client. Applies calibration, limits, rate limiting, and stop-all. See [02_safety.md](02_safety.md).
+- **Mode** – per chat: Off, Reactive (rules, no LLM), or Story (planner call).
+- **Rule** – user configuration: when (live event) + if (character, keyword, regex) → then (set scene, relative change, accent, stop).
+- **Reaction** – user feedback (more, less, hold, stop) from the sidebar or device buttons. Changes the scene now and is passed to the next planner call (and the roleplay prompt, with character awareness on).
+- **Live generation** – a generation this document saw start, tracked by `generationId`. Only live generations and new messages can move hardware.
+- **Safeword** – a word the user sends out of character to stop everything (`red`) or ease off (`yellow`).
+- **Panic stop** – the user action that stops every output immediately and pauses all sources until the user resumes.
